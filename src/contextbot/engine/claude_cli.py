@@ -111,6 +111,9 @@ class ClaudeResult:
 
     text: str
     session_id: str | None = None
+    # `total_cost_usd`: an *estimate* the CLI computes locally from token counts at standard API
+    # rates — not an amount billed. Under a Pro/Max subscription the run consumes plan usage
+    # limits, not money, so treat this as a proxy for how fast the plan's allowance is spent.
     cost_usd: float = 0.0
     duration_ms: int = 0
     num_turns: int = 0
@@ -264,8 +267,12 @@ class ClaudeCLI:
             num_turns=int(data.get("num_turns") or 0),
             raw=data,
         )
+        # `total_cost_usd` is what the job *would* have cost at standard API rates — the CLI
+        # computes it locally from token counts. On a Pro/Max subscription nothing is charged for
+        # it; the run draws from the plan's usage limits instead (shared with claude.ai and other
+        # Claude Code sessions). Logged as "~$" and "est" so it never reads as a bill.
         logger.info(
-            "claude job done: model=%s turns=%d %dms $%.4f session=%s",
+            "claude job done: model=%s turns=%d %dms ~$%.4f est session=%s",
             self.model,
             result.num_turns,
             result.duration_ms,

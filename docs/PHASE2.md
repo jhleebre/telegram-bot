@@ -285,12 +285,25 @@ Still open (each is confirmed when its increment starts):
 5. Whether to physically **share** the meeting-transcriber glossary file or copy/symlink it.
    *(increment 5)*
 
-### Cost note
+### Cost note — the budget is plan usage, not dollars
 
 A `claude -p` call carries ~9–14k cache-creation tokens (agent system prompt + tool definitions)
-regardless of prompt size — roughly $0.03–0.09 per cold call on `sonnet`. That is negligible for a
-personal capture bot at a few notes a day, but it is why `CLAUDE_ENABLED=false` exists and why
-enrichment is optional rather than load-bearing. If it ever matters, `CLAUDE_MODEL=haiku` is the
+regardless of prompt size. The result JSON reports that as `total_cost_usd` (~$0.03–0.09 per cold
+call on `sonnet`), and the engine logs it as `~$… est`.
+
+**That figure is not a bill.** The CLI computes it locally from token counts at standard API rates.
+The owner runs Claude Code on a **Pro subscription with usage credits off**, so per the Claude Code
+docs, "Max and Pro subscribers have usage included in their subscription, so the session cost figure
+isn't relevant for billing purposes." Nothing is charged beyond the subscription — usage credits are
+strictly opt-in, and with them off, hitting the limit simply blocks until the window resets (which
+is the `ClaudeUsageLimit` path above).
+
+What the number *does* measure is **how fast the bot consumes the plan's usage allowance** — the
+5-hour and weekly windows, which are **shared with claude.ai chats and the owner's own Claude Code
+sessions** ("your work in the terminal and your chats draw from one pool"). So the real cost of
+enrichment is that a memo competes with the owner's development work for the same pool. That is why
+`sonnet` (not `opus`) is the default, why `CLAUDE_ENABLED=false` exists, and why enrichment is
+optional rather than load-bearing. If the allowance ever feels tight, `CLAUDE_MODEL=haiku` is the
 first lever.
 
 ## Testing strategy
