@@ -166,13 +166,14 @@ class ClaudeCLI:
         self,
         executable: str,
         *,
+        model: str,
         system_prompt: str | None,
         add_dirs: Sequence[Path],
         resume: str | None,
         session_id: str | None,
     ) -> list[str]:
         # No prompt argv element: the prompt goes to stdin (see module docstring).
-        argv = [executable, "-p", "--output-format", "json", "--model", self.model]
+        argv = [executable, "-p", "--output-format", "json", "--model", model]
         if system_prompt is not None:
             argv += ["--system-prompt", system_prompt]
         if resume is not None:
@@ -195,11 +196,14 @@ class ClaudeCLI:
         resume: str | None = None,
         timeout_sec: float | None = None,
         cwd: Path | None = None,
+        model: str | None = None,
     ) -> ClaudeResult:
         """Run one headless job and return its parsed result.
 
         ``resume`` continues an existing session (Phase 2 review turns); ``session_id`` pins a new
-        session to a caller-chosen UUID.
+        session to a caller-chosen UUID. ``model`` overrides the engine's default model for this one
+        job — the document pipeline uses it to run PDF conversion on a more capable model than the
+        cheap default that enriches text memos.
 
         ``cwd`` overrides the engine's working directory for this job. A job that reads a file must
         set it to the directory that file was staged in: otherwise the subprocess inherits the
@@ -218,6 +222,7 @@ class ClaudeCLI:
 
         argv = self._build_argv(
             executable,
+            model=model or self.model,
             system_prompt=system_prompt,
             add_dirs=add_dirs,
             resume=resume,
@@ -282,7 +287,7 @@ class ClaudeCLI:
         # Claude Code sessions). Logged as "~$" and "est" so it never reads as a bill.
         logger.info(
             "claude job done: model=%s turns=%d %dms ~$%.4f est session=%s",
-            self.model,
+            model or self.model,
             result.num_turns,
             result.duration_ms,
             result.cost_usd,

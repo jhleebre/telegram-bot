@@ -52,10 +52,16 @@ def _msg(file_name: str | None, content: bytes = b"", *, message_id: int = 7) ->
 
 
 class FakeEngine:
-    """Stands in for ClaudeCLI: records each call, returns canned text or raises."""
+    """Stands in for ClaudeCLI: records each call, returns canned text or raises.
 
-    def __init__(self, *, text: str = "", raises: Exception | None = None):
-        self._text = text
+    ``texts`` gives a different reply per successive call (for the PDF retry path); ``text`` is the
+    single-reply shorthand.
+    """
+
+    def __init__(
+        self, *, text: str = "", texts: list[str] | None = None, raises: Exception | None = None
+    ):
+        self._texts = texts if texts is not None else [text]
         self._raises = raises
         self.calls: list[dict] = []
 
@@ -67,7 +73,9 @@ class FakeEngine:
         self.calls.append(call)
         if self._raises is not None:
             raise self._raises
-        return ClaudeResult(text=self._text, session_id="s-1")
+        # Clamp to the last reply so a fixed single-text engine answers every retry the same way.
+        text = self._texts[min(len(self.calls) - 1, len(self._texts) - 1)]
+        return ClaudeResult(text=text, session_id="s-1")
 
 
 def _metadata(payload: dict) -> FakeEngine:
@@ -321,6 +329,53 @@ async def test_pdf_timeout_budget_honours_a_higher_setting(llm_settings):
         _msg("report.pdf", b"%PDF"), replace(llm_settings, claude_timeout_sec=900.0), engine=engine
     )
     assert engine.calls[0]["timeout_sec"] == 900.0
+
+
+async def test_pdf_runs_on_the_pdf_model(llm_settings):
+    """Conversion is flaky on the cheap default, so the PDF path uses claude_pdf_model (opus)."""
+    engine = FakeEngine(text=MARKDOWN)
+    settings = replace(llm_settings, claude_model="sonnet", claude_pdf_model="opus")
+    await handle_document(_msg("report.pdf", b"%PDF"), settings, engine=engine)
+    assert engine.calls[0]["model"] == "opus"
+
+
+async def test_pdf_retries_a_flaky_sentinel_then_succeeds(llm_settings):
+    """A readable file that spuriously returns the sentinel is retried, not permanently skipped."""
+    engine = FakeEngine(texts=["CONVERSION_FAILED", MARKDOWN])
+    result = await handle_document(_msg("report.pdf", b"%PDF"), llm_settings, engine=engine)
+
+    assert len(engine.calls) == 2  # bailed once, converted on the retry
+    assert result.saved_path is not None
+    assert "매출이 증가했습니다." in _body(result.saved_path)
+
+
+async def test_pdf_gives_up_after_max_attempts(llm_settings):
+    """A genuinely unreadable file returns the sentinel every time and ends in a reported failure —
+    the retry never turns a bad file into a fabricated note."""
+    engine = FakeEngine(text="CONVERSION_FAILED")
+    result = await handle_document(_msg("report.pdf", b"%PDF"), llm_settings, engine=engine)
+
+    assert len(engine.calls) == 3  # _PDF_MAX_ATTEMPTS
+    assert result.saved_path is None
+    assert "변환하지 못했습니다" in result.reply
+    assert _downloads(llm_settings) == ["report.pdf"]
+
+
+async def test_pdf_truncated_stub_is_treated_as_failure(llm_settings):
+    """A too-short reply slips past the sentinel check but is a hollow note — measured at 19 chars
+    on a flaky run — so it must be retried, then reported if it never recovers."""
+    engine = FakeEngine(text="# 제안서")  # under _PDF_MIN_OUTPUT_CHARS
+    result = await handle_document(_msg("report.pdf", b"%PDF"), llm_settings, engine=engine)
+
+    assert len(engine.calls) == 3
+    assert result.saved_path is None
+    assert "변환하지 못했습니다" in result.reply
+
+
+async def test_pdf_short_stub_recovers_on_retry(llm_settings):
+    engine = FakeEngine(texts=["# 짧음", MARKDOWN])
+    result = await handle_document(_msg("report.pdf", b"%PDF"), llm_settings, engine=engine)
+    assert result.saved_path is not None
 
 
 async def test_sentinel_writes_no_note(llm_settings):

@@ -123,6 +123,8 @@ def test_claude_defaults(tmp_path):
     assert settings.claude_enabled is True
     assert settings.claude_bin == "claude"
     assert settings.claude_model == "sonnet"
+    # PDF conversion defaults to a stronger model than text enrichment (measured flaky on sonnet).
+    assert settings.claude_pdf_model == "opus"
     assert settings.claude_timeout_sec == 120.0
 
 
@@ -131,11 +133,13 @@ def test_claude_overrides(tmp_path):
     env.update(
         CLAUDE_BIN="/opt/homebrew/bin/claude",
         CLAUDE_MODEL="opus",
+        CLAUDE_PDF_MODEL="sonnet",
         CLAUDE_TIMEOUT_SEC="300",
     )
     settings = Settings.load(env, use_dotenv=False)
     assert settings.claude_bin == "/opt/homebrew/bin/claude"
     assert settings.claude_model == "opus"
+    assert settings.claude_pdf_model == "sonnet"
     assert settings.claude_timeout_sec == 300.0
 
 

@@ -21,6 +21,10 @@ DEFAULT_SESSION_PATH = _PROJECT_ROOT / "state" / "contextbot.session"
 # Phase 2 engine defaults (`claude -p`). Model/timeout are env-tunable per pipeline needs.
 DEFAULT_CLAUDE_BIN = "claude"
 DEFAULT_CLAUDE_MODEL = "sonnet"
+# PDF conversion reads a whole document (often image-heavy slides) and is measurably flaky on the
+# cheap default — sonnet took the "cannot read" escape hatch on ~60% of runs of a real 8-page deck,
+# where opus converted it every time. PDFs are occasional, so the heavier model is worth it here.
+DEFAULT_CLAUDE_PDF_MODEL = "opus"
 DEFAULT_CLAUDE_TIMEOUT_SEC = 120.0
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -62,6 +66,7 @@ class Settings:
     claude_enabled: bool = True
     claude_bin: str = DEFAULT_CLAUDE_BIN
     claude_model: str = DEFAULT_CLAUDE_MODEL
+    claude_pdf_model: str = DEFAULT_CLAUDE_PDF_MODEL
     claude_timeout_sec: float = DEFAULT_CLAUDE_TIMEOUT_SEC
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
@@ -72,6 +77,7 @@ class Settings:
             f"owner_chat_id={self.owner_chat_id}, "
             f"log_level={self.log_level!r}, claude_enabled={self.claude_enabled}, "
             f"claude_bin={self.claude_bin!r}, claude_model={self.claude_model!r}, "
+            f"claude_pdf_model={self.claude_pdf_model!r}, "
             f"claude_timeout_sec={self.claude_timeout_sec})"
         )
 
@@ -150,6 +156,7 @@ class Settings:
 
         claude_bin = (env.get("CLAUDE_BIN") or DEFAULT_CLAUDE_BIN).strip()
         claude_model = (env.get("CLAUDE_MODEL") or DEFAULT_CLAUDE_MODEL).strip()
+        claude_pdf_model = (env.get("CLAUDE_PDF_MODEL") or DEFAULT_CLAUDE_PDF_MODEL).strip()
 
         claude_timeout_sec = DEFAULT_CLAUDE_TIMEOUT_SEC
         raw_timeout = (env.get("CLAUDE_TIMEOUT_SEC") or "").strip()
@@ -179,5 +186,6 @@ class Settings:
             claude_enabled=claude_enabled,
             claude_bin=claude_bin,
             claude_model=claude_model,
+            claude_pdf_model=claude_pdf_model,
             claude_timeout_sec=claude_timeout_sec,
         )

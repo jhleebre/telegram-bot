@@ -55,6 +55,18 @@ _SENTINEL = "CONVERSION_FAILED"
 # several turns. Floor the budget well above that; CLAUDE_TIMEOUT_SEC still wins if raised higher.
 _PDF_MIN_TIMEOUT_SEC = 300.0
 
+# A real conversion opens with a `#` heading and a body. A reply shorter than this is a truncated
+# or title-only stub that slipped past the sentinel (measured: a flaky run returned 19 chars) —
+# treat it as a failed attempt so it is retried, not saved as a hollow note. Kept low so a genuinely
+# brief document still converts; the retry and the original in ~/Downloads cover the rest.
+_PDF_MIN_OUTPUT_CHARS = 20
+
+# Conversion is flaky on large, image-heavy PDFs — the model sometimes takes the sentinel escape
+# hatch or truncates on a file it can plainly read. A fresh retry clears that; a genuinely
+# unreadable file returns the sentinel on every attempt and still ends in a reported failure, so
+# the anti-fabrication guarantee holds. Bounded so a truly bad file can't burn the plan allowance.
+_PDF_MAX_ATTEMPTS = 3
+
 _PDF_SYSTEM_PROMPT = (
     "You are a document-to-Markdown converter for a personal knowledge base. "
     "You transcribe faithfully and never invent content you could not read."
@@ -214,9 +226,14 @@ async def _handle_text_like(
 
 # ------------------------------------------------------------------ .pdf
 def _conversion_failed(text: str) -> bool:
-    """True when the model reported it could not read the staged file (or returned nothing)."""
+    """True when a conversion attempt did not produce a usable note.
+
+    Covers three shapes: the explicit sentinel (checked on the first line, so a document that merely
+    *mentions* the token still converts), empty output, and a stub too short to be a real document
+    (a flaky truncation that would otherwise slip through as a hollow note).
+    """
     stripped = text.strip()
-    if not stripped:
+    if len(stripped) < _PDF_MIN_OUTPUT_CHARS:
         return True
     first_line = stripped.splitlines()[0].strip().strip("`*# ")
     return first_line.startswith(_SENTINEL)
@@ -243,7 +260,9 @@ async def _handle_pdf(
     The PDF is staged **alone** in a temp dir which is both the job's cwd and its only `--add-dir`.
     That isolation is not tidiness: given a file it cannot read, the model will happily convert a
     neighbouring one instead and report success. Staging alone removes the neighbours; the
-    sentinel catches the rest.
+    sentinel catches the rest. Conversion runs on ``claude_pdf_model`` (opus by default): a whole
+    image-heavy document is measurably flakier than a text memo, and a bounded retry absorbs what
+    the stronger model doesn't.
     """
     if not settings.claude_enabled:
         # No no-LLM path exists here — rendering the page *is* the LLM's job. Say so plainly
@@ -259,30 +278,42 @@ async def _handle_pdf(
         stage = Path(tmp)
         src = await _download(message, stage)  # the only file in `stage`
         engine = engine or build_engine(settings)
+        prompt = prompts.render("pdf_to_markdown", path=str(src), sentinel=_SENTINEL)
+        timeout = max(settings.claude_timeout_sec, _PDF_MIN_TIMEOUT_SEC)
 
-        try:
-            result = await engine.run(
-                prompts.render("pdf_to_markdown", path=str(src), sentinel=_SENTINEL),
-                system_prompt=_PDF_SYSTEM_PROMPT,
-                add_dirs=[stage],
-                cwd=stage,
-                timeout_sec=max(settings.claude_timeout_sec, _PDF_MIN_TIMEOUT_SEC),
+        body: str | None = None
+        for attempt in range(1, _PDF_MAX_ATTEMPTS + 1):
+            try:
+                result = await engine.run(
+                    prompt,
+                    system_prompt=_PDF_SYSTEM_PROMPT,
+                    add_dirs=[stage],
+                    cwd=stage,
+                    timeout_sec=timeout,
+                    model=settings.claude_pdf_model,
+                )
+            except ClaudeUsageLimit as exc:
+                # Transient: defer before anything is written or moved, and let the client halt.
+                # The PDF stays in Saved Messages and the next Start replays it from scratch.
+                logger.warning("usage limit; deferring message %s: %s", message.message_id, exc)
+                raise DeferMessage(str(exc)) from exc
+            except ClaudeError as exc:
+                # A hard engine error (timeout, non-JSON) is not the flaky case a retry fixes.
+                logger.warning("PDF conversion failed for %s: %s", src.name, exc)
+                moved = move_to_downloads(src, downloads_dir=settings.downloads_dir)
+                return HandlerResult(reply=_pdf_failed_reply(src.name, str(exc), moved))
+
+            if not _conversion_failed(result.text):
+                body = result.text
+                break
+            # is_error was False and the CLI reported success — but the reply is the sentinel or an
+            # empty stub. On a readable file this is the model bailing spuriously, so retry; on a
+            # genuinely unreadable one every attempt lands here and we fall through to the failure.
+            logger.warning(
+                "PDF conversion attempt %d/%d unusable for %s", attempt, _PDF_MAX_ATTEMPTS, src.name
             )
-        except ClaudeUsageLimit as exc:
-            # Transient: defer before anything is written or moved, and let the client halt. The
-            # PDF stays in Saved Messages and the next Start replays it from scratch.
-            logger.warning("usage limit reached; deferring message %s: %s", message.message_id, exc)
-            raise DeferMessage(str(exc)) from exc
-        except ClaudeError as exc:
-            logger.warning("PDF conversion failed for %s: %s", src.name, exc)
-            moved = move_to_downloads(src, downloads_dir=settings.downloads_dir)
-            return HandlerResult(reply=_pdf_failed_reply(src.name, str(exc), moved))
 
-        body = result.text
-        if _conversion_failed(body):
-            # is_error was False and the CLI reported success — but the model told us it never
-            # read the file. Writing a note now would be writing a fabrication.
-            logger.warning("PDF conversion reported %s for %s", _SENTINEL, src.name)
+        if body is None:
             moved = move_to_downloads(src, downloads_dir=settings.downloads_dir)
             return HandlerResult(
                 reply=_pdf_failed_reply(src.name, "문서를 읽지 못했습니다", moved)

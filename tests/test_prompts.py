@@ -28,7 +28,8 @@ def test_pdf_template_forbids_substituting_another_source():
     """The fabrication guard is the prompt's job; the sentinel check is only the backstop."""
     out = prompts.render("pdf_to_markdown", path="/x.pdf", sentinel="S")
     assert "only file in its directory" in out
-    assert "Do not read any other file" in out
+    assert "fall back to any other file" in out
+    assert "never reconstruct the content from your own" in out
 
 
 def test_unknown_template_raises():

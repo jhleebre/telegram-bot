@@ -98,6 +98,23 @@ async def test_per_call_cwd_overrides_the_engine_default(make_claude, tmp_path):
     assert Path(result.text).resolve() == stage.resolve()
 
 
+async def test_per_call_model_overrides_the_default(make_claude, claude_calls):
+    """The PDF pipeline runs one job on a stronger model than the engine's default."""
+    script = make_claude(claude_prints(SUCCESS_RESULT))
+    await _cli(script, model="sonnet").run("hi", model="opus")
+
+    argv = claude_calls()[0]["argv"]
+    assert argv[argv.index("--model") + 1] == "opus"
+
+
+async def test_default_model_used_when_no_override(make_claude, claude_calls):
+    script = make_claude(claude_prints(SUCCESS_RESULT))
+    await _cli(script, model="haiku").run("hi")
+
+    argv = claude_calls()[0]["argv"]
+    assert argv[argv.index("--model") + 1] == "haiku"
+
+
 async def test_resume_passes_session_id(make_claude, claude_calls):
     script = make_claude(claude_prints(SUCCESS_RESULT))
     await _cli(script).resume_session("abc-123", "그 용어는 틀렸어")

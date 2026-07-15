@@ -9,7 +9,7 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > *Increment 1 (as built)* (the engine's contract and the three real-world bugs it hit) →
 > *Increment 2 (as built)* (the file pipelines and the isolation the PDF route depends on) →
 > *Usage-limit policy* (binding on every later increment) → *Next up: increment 3*.
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **263 passing**, no network or model runs.
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **270 passing**, no network or model runs.
 
 **Ingestion recap (from the Phase 1 hybrid):** input files arrive via **Saved Messages** (Telethon)
 and are downloaded to a temp dir with `message.download_media(...)`. The **review conversation runs
@@ -49,9 +49,10 @@ harder two-way review flow (4) and the STT-heavy audio pipeline (5) are attempte
 ### Increment 2 (as built) — PDF → Markdown
 
 Delivered: `handlers/document_handler.py` (five routes), `files/originals.py`, `files/text_files.py`,
-`engine/prompts/pdf_to_markdown.md`, the `DOWNLOADS_DIR` setting, `ClaudeCLI.run(cwd=…)`, and —
-after owner verification (below) — `ClaudeCLI.check_auth` behind an upgraded `claude-engine` health
-probe. Suite: 171 → **263**.
+`engine/prompts/pdf_to_markdown.md`, the `DOWNLOADS_DIR` setting, `ClaudeCLI.run(cwd=…, model=…)`,
+and — during owner verification (below) — `ClaudeCLI.check_auth` behind an upgraded `claude-engine`
+health probe, plus the PDF robustness changes (`CLAUDE_PDF_MODEL`, prompt hardening, output guard,
+bounded retry). Suite: 171 → **270**.
 
 **The decisions recorded below were all made before building, and every one of them held.** They
 are kept as the *why*; the "As built" subsection at the end of this section is the *what*.
@@ -170,7 +171,18 @@ Points worth knowing before touching this:
 - **The sentinel is checked on the first line, not by substring.** A document that legitimately
   contains the word `CONVERSION_FAILED` (an error-code table, say) must still convert; a model that
   leads with `CONVERSION_FAILED`, `` `CONVERSION_FAILED` ``, `# CONVERSION_FAILED`, or
-  `CONVERSION_FAILED: <excuse>` must not. Empty output counts as failure too.
+  `CONVERSION_FAILED: <excuse>` must not. Empty output — and a too-short stub (`< 20` chars, a
+  truncation that slips past the sentinel) — count as failure too.
+- **PDF runs on `claude_pdf_model` (opus), not the cheap default, and retries.** Owner verification
+  (round 2, below) found conversion *flaky* on `sonnet` for a real image-heavy deck. So the `.pdf`
+  route: (1) runs on `claude_pdf_model` — opus by default, `CLAUDE_PDF_MODEL` to change — via the
+  new `run(model=…)` override, while text enrichment stays on the cheap `claude_model`; (2) uses a
+  hardened prompt that reserves the sentinel for a genuine `Read` failure and tells the model that a
+  long/heavy document is normal, not a reason to bail; (3) **retries up to `_PDF_MAX_ATTEMPTS` (3)**
+  when an attempt returns the sentinel or a stub. The retry is what stops a *flaky* bail from
+  permanently skipping the PDF (a sentinel result is a normal `HandlerResult`, so the HWM would
+  otherwise advance past it). It never launders a bad file: a genuinely unreadable one returns the
+  sentinel on all three attempts and still ends in a reported failure, original filed.
 - **`enrich_or_fallback` is now the shared enrichment entry point** in `text_handler`, used by both
   `handle_text` and the `.txt`/`.csv` route. It raises `DeferMessage` on a usage limit and swallows
   everything else into a `degraded` reason, which is what keeps the "call it before any side
@@ -198,9 +210,8 @@ Points worth knowing before touching this:
 written the way Excel writes one), and the PDF route end-to-end against the real `claude` binary —
 which in a *nested* Claude Code session cannot authenticate (`Not logged in · Please run /login`,
 `is_error: true`, `api_error_status: null`). That accidentally proved the non-limit degradation
-path against the real CLI: no note, reason in the reply, original filed. It also means **the
-conversion quality itself is owner-verified only** — a fresh session cannot probe it from inside
-Claude Code.
+path against the real CLI: no note, reason in the reply, original filed. Once the CLI was logged in
+(round 2 below), the full PDF conversion was driven for real too.
 
 **Owner verification, round 1 (the login gap).** The owner's first real PDF failed with
 `Not logged in · Please run /login` — and a plain text memo then failed the same way, proving the
@@ -208,8 +219,19 @@ CLI's login had simply expired (this machine, not the pipeline). The code behave
 fabricated note, original filed, reason relayed, no halt — a login failure is not `DeferMessage`
 territory). But the `claude-engine` health probe had been green throughout, because it only checked
 that the binary was *findable*. Closed here: the probe now also runs `claude auth status --json` and
-reports **DEGRADED — logged out**. Re-login (`claude`, then `/login`) is an owner action; PDF
-conversion quality remains to be verified once logged back in.
+reports **DEGRADED — logged out**. (Root cause of the expiry: a corporate PAC proxy —
+`ProxyAutoConfigEnable` → an internal SKT host — that is unreachable off the office LAN, so token
+refresh failed at home. That is the owner's device/network, not the bot.)
+
+**Owner verification, round 2 (the flaky conversion — now closed).** Logged back in, the owner's
+real 8-page/5.4MB proposal deck returned the `CONVERSION_FAILED` sentinel. Investigation (driving
+the real CLI against a copy the owner staged at `/tmp/probe.pdf`) showed the file was perfectly
+readable — a plain "just read it and report" prompt read all pages — but the *conversion invocation*
+was **flaky on `sonnet`: 3 of 5 runs took the sentinel escape hatch, and one produced a 19-char
+stub. `opus` converted it 2 of 2, then 3 of 3 through the full handler.** Fixes (all above under the
+PDF bullet): `claude_pdf_model=opus` by default, a hardened prompt, the short-stub guard, and the
+bounded retry. **PDF conversion quality is now owner-verified** — the resulting note carries the
+document's own title, `##`/`###` structure, and rendered tables, faithfully.
 
 ## Scope
 
@@ -426,8 +448,10 @@ Suite: 88 → 171.
 Increment 2 adds `test_document_handler.py` (all five routes, the sentinel variants, staging
 isolation, deferral-leaves-no-side-effect for both `.pdf` and `.txt`), `test_text_files.py`
 (CP949/UTF-16 decoding, CSV escaping and caps), and `test_originals.py`. The `check_auth` login
-probe (added during owner verification) is covered in `test_claude_cli.py` and `test_health.py`.
-Suite: 171 → 263.
+probe and the PDF robustness changes (retry recovery, give-up-after-N, short-stub guard, the
+`model=` override and `CLAUDE_PDF_MODEL`) — both added during owner verification — are covered in
+`test_document_handler.py`, `test_claude_cli.py`, `test_health.py`, and `test_config.py`.
+Suite: 171 → 270.
 
 ## Human-in-the-loop via session preservation
 
