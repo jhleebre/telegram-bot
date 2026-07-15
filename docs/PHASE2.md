@@ -50,8 +50,43 @@ Scope: `handlers/document_handler.py` (currently a stub), `converters/doc_to_mar
 `files/originals.py`. No review loop. Includes the `.md` passthrough (item D), which needs no
 converter and no LLM — **build that first**, it is a few lines and proves the routing end-to-end.
 
-Decide first: **open decision 3, the base converter** — `markitdown` vs `pandoc` + `python-docx`/
-`python-pptx`/`pdfplumber` vs Claude-skill-driven. Nothing else in the increment is blocked on it.
+**Open decision 3 is settled in direction: drive the conversion with Claude Code, not a Python
+library** (owner's call — library output is typically mediocre on layout, tables, and structure).
+Probed against the real CLI before committing to it; the results change how it must be built:
+
+| Flags | Turns | Result |
+|-------|-------|--------|
+| Increment 1's hermetic flags (default permission mode) | 26 | ❌ **Fabricated** — see below |
+| `--permission-mode bypassPermissions` + isolated dir | 8 | ✅ accurate (67s, ~$0.10 est) |
+
+- **Default permission mode denies Bash**, and `Read` cannot parse a `.docx` (a ZIP). All 13 Bash
+  attempts (`unzip`, `python3`, `node`, `perl`, `strings`, `textutil`, …) were denied, so it had no
+  way to open the file at all. A permission mode is therefore **required** — the one thing
+  increment 1 concluded was unnecessary, because the engine was text-in/text-out. Documents are not.
+- **It fabricates rather than failing, and reports success.** Blocked from the `.docx`, it read a
+  *neighbouring* `.rtf` that happened to hold the same content, produced convincing Markdown, and
+  returned `is_error: False`. In production that is a note built from the wrong source, saved
+  silently. Two consequences: **stage the file alone in an isolated temp dir** (`--add-dir` that
+  dir, nothing else), and **do not treat `is_error: False` as proof the output came from the
+  document** — have the prompt emit a sentinel on failure and check for it.
+- **Cost**: ~8 turns / ~67s / ~$0.10 est per document vs 1 turn / ~4s / ~$0.05 for a text memo — it
+  burns the plan's usage allowance roughly twice as fast, and is slow enough that the per-job
+  timeout needs raising above the 60s the text path uses.
+
+**The one thing to decide before writing code — how far to open the tools.** `bypassPermissions`
+gives Claude a shell, and **document content is a prompt-injection vector**: only the owner can
+write to Saved Messages, but that does not make the *document* theirs — a forwarded PDF can carry
+"ignore previous instructions and …" straight into a model that holds a shell. Options:
+
+- **Narrow `--allowedTools`** instead of a full bypass (e.g. only what unzip/extract needs).
+- **Hybrid** — a library does the raw *extraction* (no LLM), Claude does the *structuring* from that
+  text (no tools). This removes the shell entirely, so the injection risk goes with it, and still
+  answers the "libraries are mediocre" objection: the library only does extraction, which libraries
+  are fine at; Claude does the layout/structure, which is what they are bad at.
+- Sandbox the run (container / restricted user).
+
+Also worth probing first: **PDF may need no tools at all** — Claude Code's `Read` parses PDFs
+natively. If so, PDF is a much cheaper path than docx/pptx and might not need a permission mode.
 
 Constraints inherited from increment 1 (do not re-litigate):
 
@@ -133,6 +168,10 @@ Design points that differ from / firm up the sketch above:
 - **No permission mode is needed** (open decision 1, resolved → *bot writes*): the engine is
   text-in / text-out and Claude is never granted write access. `--add-dir` remains available for
   read-only context (the glossary, in increment 5).
+  **Superseded for increment 2 onward:** that holds only while the input *is* the prompt. A document
+  must be read from disk, and with the default permission mode every Bash attempt is denied — so
+  `ClaudeCLI.run` will need to expose `--permission-mode` / `--allowedTools`. "The bot writes the
+  note" still stands; "Claude needs no tools" does not. See *Next up: increment 2*.
 - **Result JSON shape** (verified, CLI v2.1.187): `{result, session_id, is_error, subtype,
   total_cost_usd, duration_ms, num_turns}` → `ClaudeResult`. Errors surface as `ClaudeUnavailable`
   (no CLI), `ClaudeTimeout` (killed at the deadline), `ClaudeError` (non-zero exit / non-JSON /
@@ -347,7 +386,11 @@ Still open (each is confirmed when its increment starts):
 
 2. Whether meeting notes should also trigger the glossary **git commit/push** the `/meeting` skill
    does (both the vault and meeting-transcriber are git repos). *(increment 5)*
-3. Base document converter: `markitdown` vs `pandoc`-based vs Claude-skill-driven. *(increment 2)*
+3. ~~Base document converter~~ — **direction decided: Claude-Code-driven, not a Python library**
+   (owner's call). What remains for increment 2 is *how far to open the tools* — full
+   `bypassPermissions` vs a narrow `--allowedTools` vs the hybrid (library extracts, Claude
+   structures, no shell). See *Next up: increment 2* for the probe results that constrain this.
+   *(increment 2)*
 5. Whether to physically **share** the meeting-transcriber glossary file or copy/symlink it.
    *(increment 5)*
 
