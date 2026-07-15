@@ -11,7 +11,7 @@ from contextbot.engine.claude_cli import (
     ClaudeUnavailable,
     ClaudeUsageLimit,
 )
-from contextbot.handlers.base import IncomingMessage, MessageKind
+from contextbot.handlers.base import DeferMessage, IncomingMessage, MessageKind
 from contextbot.handlers.text_handler import handle_text
 
 
@@ -170,14 +170,26 @@ async def test_falls_back_to_first_line_on_any_failure(llm_settings, engine):
     assert "본문" in result.saved_path.read_text(encoding="utf-8")
 
 
-async def test_usage_limit_is_reported_in_the_reply(llm_settings):
-    """A usage limit can last hours; the bot DM is the only place the owner would notice."""
-    engine = FakeEngine(raises=ClaudeUsageLimit("API Error: Claude AI usage limit reached"))
-    result = await handle_text(_msg("메모"), llm_settings, engine=engine)
+async def test_usage_limit_defers_instead_of_degrading(llm_settings):
+    """Policy: a usage limit is transient, so defer the message rather than save a weaker note.
 
-    assert result.saved_path.exists()  # the note is never lost
-    assert "저장됨" in result.reply
-    assert "사용량 제한" in result.reply
+    The message stays in Saved Messages and the client replays it on the next Start, so nothing is
+    lost — see handlers/base.DeferMessage.
+    """
+    engine = FakeEngine(raises=ClaudeUsageLimit("API Error: Claude AI usage limit reached"))
+
+    with pytest.raises(DeferMessage, match="usage limit reached"):
+        await handle_text(_msg("메모"), llm_settings, engine=engine)
+
+
+async def test_deferral_writes_nothing(llm_settings):
+    """The replay re-runs the handler from scratch, so a deferral must leave no partial note."""
+    engine = FakeEngine(raises=ClaudeUsageLimit("limit"))
+
+    with pytest.raises(DeferMessage):
+        await handle_text(_msg("메모"), llm_settings, engine=engine)
+
+    assert not list(llm_settings.inbox_dir.iterdir())
 
 
 async def test_other_engine_failure_is_reported_in_the_reply(llm_settings):

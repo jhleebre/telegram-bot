@@ -18,6 +18,7 @@ from typing import Optional
 from telethon import TelegramClient, events
 
 from ..config import Settings
+from ..handlers.base import DeferMessage
 from .health import HealthChecker, HealthReport
 from .hwm import HighWaterMark
 from .notifier import Notifier
@@ -90,6 +91,11 @@ class ClientService:
                 logger.info("First run: baselined HWM to %s (existing history skipped)", latest)
 
             await self.catch_up()
+        except DeferMessage as exc:
+            # The backlog hit a usage limit. Halt instead of falling through to RUNNING — the
+            # deferred message and everything after it stay unprocessed for the next Start.
+            await self._halt(exc)
+            return
         except Exception as exc:
             logger.exception("Failed to start client")
             if self._status.status != BotStatus.ERROR:
@@ -98,17 +104,34 @@ class ClientService:
         self._status.set(BotStatus.RUNNING, "실행 중")
         logger.info("Client started (Saved Messages input, bot replies)")
 
-    async def stop(self) -> None:
+    async def stop(self, *, message: str = "중지됨") -> None:
+        """Disconnect and report STOPPED. ``message`` lets a self-initiated stop explain itself."""
         client = self._client
         if client is None:
-            self._status.set(BotStatus.STOPPED, "중지됨")
+            self._status.set(BotStatus.STOPPED, message)
             return
         try:
             if client.is_connected():
                 await client.disconnect()
         finally:
-            self._status.set(BotStatus.STOPPED, "중지됨")
+            self._status.set(BotStatus.STOPPED, message)
             logger.info("Client stopped")
+
+    async def _halt(self, exc: DeferMessage) -> None:
+        """Stop reading because a message was deferred; the next Start replays it.
+
+        The DM goes out **before** disconnecting: the bot replies over the Bot API, not the
+        Telethon client, so it still works — and if the disconnect interrupts us, the owner has
+        already been told why the bot went quiet.
+        """
+        logger.warning("Halting: %s", exc)
+        if self._notifier is not None:
+            await self._notifier.send(
+                "⏸ 사용량 한도에 도달해 봇을 멈췄습니다.\n"
+                "메시지는 그대로 남아 있고, 한도 리셋 후 Start하면 이어서 처리합니다.\n"
+                f"({exc})"
+            )
+        await self.stop(message="⏸ 사용량 한도 — 리셋 후 Start를 눌러주세요")
 
     def is_connected(self) -> bool:
         try:
@@ -129,21 +152,32 @@ class ClientService:
         return 0
 
     async def catch_up(self) -> int:
-        """Process Saved Messages with id greater than the HWM, oldest-first. Returns the count."""
+        """Process Saved Messages with id greater than the HWM, oldest-first. Returns the count.
+
+        A :class:`DeferMessage` breaks the loop and propagates. That is essential, not incidental:
+        the HWM is a *single* watermark, so continuing past a deferred message and advancing it on
+        a later success would put the deferred id below the watermark and strand it forever.
+        Stopping at the first deferral is what keeps the replay correct and ordered.
+        """
         last = self._hwm.value
         count = 0
-        async for message in self._client.iter_messages(SAVED, min_id=last, reverse=True):
-            await self._process(message, notify_status=False)
-            count += 1
-        if count:
-            logger.info("Catch-up processed %d message(s) since last run", count)
+        try:
+            async for message in self._client.iter_messages(SAVED, min_id=last, reverse=True):
+                await self._process(message, notify_status=False)
+                count += 1
+        finally:
+            if count:
+                logger.info("Catch-up processed %d message(s) since last run", count)
         return count
 
     async def _on_new_message(self, event) -> None:
         message = getattr(event, "message", None)
         if getattr(event, "chat_id", None) != self._me_id:
             return  # only the owner's Saved Messages
-        await self._process(message, notify_status=True)
+        try:
+            await self._process(message, notify_status=True)
+        except DeferMessage as exc:
+            await self._halt(exc)
 
     # ------------------------------------------------------------------ dispatch
     async def _process(self, message, *, notify_status: bool) -> None:
@@ -166,11 +200,23 @@ class ClientService:
             if result.reply and self._notifier is not None:
                 await self._notifier.send(result.reply)
             self._hwm.advance(incoming.message_id)
+        except DeferMessage:
+            # Transient (usage limit): leave the HWM untouched so the next Start replays this
+            # message, and let the caller halt. Never advance here.
+            raise
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Error while processing message id=%s", incoming.message_id)
-            self._status.set(BotStatus.ERROR, f"처리 오류: {exc}")
+            # Permanent (corrupt file, a bug): retrying would fail identically and halting would
+            # wedge the bot on every Start, so skip past it — but advance the HWM *deliberately*
+            # and say so, because a single watermark means the message is not retried again.
+            logger.exception("Error while processing message id=%s — skipping", incoming.message_id)
+            self._hwm.advance(incoming.message_id)
             if self._notifier is not None:
-                await self._notifier.send(f"⚠️ 처리 중 오류가 발생했습니다: {exc}")
+                await self._notifier.send(
+                    f"⚠️ 메시지 처리 실패 (id={incoming.message_id})\n"
+                    f"원인: {exc}\n"
+                    "이 메시지는 건너뜁니다 — 자동 재시도하지 않습니다.\n"
+                    "(Saved Messages에 원본이 남아 있으니 필요하면 다시 보내주세요)"
+                )
         finally:
             if notify_status and self._status.status == BotStatus.PROCESSING:
                 self._status.set(BotStatus.RUNNING, "실행 중")

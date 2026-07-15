@@ -164,22 +164,61 @@ Three consequences, all now handled:
 For text notes this is fully safe: the note is saved via the Phase 1 path after a ~2s failure, and
 the bot DM says why. **Increments 2–5 need more thought** — see "Degradation per pipeline" below.
 
+### Usage-limit policy — defer and replay (decided; implemented)
+
+**When the usage limit is exhausted, the bot stops and leaves the message unprocessed. The owner
+restarts after the limit resets, and catch-up replays it from where it left off.**
+
+This needs no queue: the HWM already advances only on success, Saved Messages is durable, and
+catch-up already replays from the HWM. **Deferring is lossless** — which is the same property that
+made Saved Messages the input in Phase 1.
+
+**Transient vs permanent is the whole distinction:**
+
+| Failure | Retry later? | Policy |
+|---------|--------------|--------|
+| **Usage limit** (`ClaudeUsageLimit`) | succeeds after reset | **Defer + halt.** HWM untouched; STOPPED with the reason; DM explains. |
+| Missing CLI, timeout, non-JSON | may keep failing; not time-bound | Degrade (text keeps the Phase 1 path) — halting here would stop the bot on every Start and wedge it |
+| Corrupt file, a bug in our code | fails identically forever | **Skip + announce.** Advance the HWM deliberately and DM `id=N … 건너뜁니다`. Halting would wedge the bot; silence would lose the message. |
+
+`handlers/base.DeferMessage` is the handler→client contract (a domain signal, so `core` stays
+decoupled from the engine). A handler must raise it **before any side effect**, because the replay
+re-runs the handler from scratch. Applies to text too: a limit defers rather than saving a weaker
+note the owner would have to find and fix later.
+
+#### Three bugs this policy surfaced (all pre-existing, all fixed)
+
+1. **Stranding — the blocker.** `_process` swallowed every exception and `catch_up` kept going. The
+   HWM is a *single* watermark, so a later success advanced it **past** the failed message, which
+   the `id <= hwm` guard then skipped forever. Proven before fixing: backlog `[1,2,3]` with 2
+   failing → run 1 processed all three, HWM = 3, restart processed **nothing**. Message 2 was gone.
+   This lost messages in Phase 1 already, independent of Phase 2. Catch-up now breaks at the first
+   deferral, which is what keeps the replay correct and ordered.
+2. **`start()` set RUNNING unconditionally** after catch-up, so a halt would have been overwritten.
+3. **The UI followed only ERROR**, not STOPPED, so a self-initiated stop left the button on "Stop"
+   with `_running=True` — the owner would have to dead-click Stop before Start worked.
+
 #### Degradation per pipeline (decide when each increment is built)
 
-Text enrichment degrades cleanly because a no-LLM path exists. **The later pipelines have no such
-luxury and must not silently produce a bad note:**
+The deferral policy covers *limits*. Each pipeline still needs an answer for a **non-limit** engine
+failure, and text is the only one with a real no-LLM path:
 
-| Pipeline | If the engine is unavailable / limited |
-|----------|----------------------------------------|
+| Pipeline | If the engine fails for a non-limit reason |
+|----------|-------------------------------------------|
 | Text (1) | ✅ Phase 1 path; note keeps full fidelity, only metadata is weaker |
 | Document (2) | Deterministic converter output can still be saved un-refined — degrade like text |
 | Image (3) | No fallback: a described note *is* the LLM output. Save the image + a stub note? |
 | Audio (5) | **No fallback.** STT is local, so the transcript survives — but the meeting note does not. Saving the raw transcript beats losing the recording. |
-| Review (4) | A limit mid-review would strand a session in `AWAITING_REVIEW`. The state machine must handle "cannot resume right now" without dropping the draft. |
+| Review (4) | A failure mid-review would strand a session in `AWAITING_REVIEW`. The state machine must handle "cannot resume right now" without dropping the draft. |
 
-A **circuit breaker** (skip the engine for N minutes after a `ClaudeUsageLimit` instead of retrying
-per message) is deliberately *not* built yet: at ~2s per failure and a few notes a day it buys
-nothing. It becomes worthwhile once audio jobs — which are expensive and may retry — exist.
+**Replay cost (increment 5).** A deferred message re-runs its handler *from the start* — for audio
+that means re-downloading and re-running Whisper (minutes). Either cache the transcript keyed by
+message id, or accept the rework. Non-negotiable either way: **all side effects (moving the
+original to `~/Downloads`, deleting the audio, writing the note) must come after the last LLM call**,
+or be idempotent — otherwise the replay duplicates them.
+
+A **circuit breaker** (skip the engine for N minutes after a `ClaudeUsageLimit`) is now moot for
+capture: the bot halts on the first limit rather than retrying per message.
 
 #### Making degradation visible
 
@@ -190,16 +229,16 @@ surfaces now report it:
 - The health panel carries a **`claude-engine`** probe showing the resolved path + model; a missing
   CLI reports **DEGRADED** (not ERROR — capture still works). It proves the binary is *findable*,
   not that it can *run* — a usage limit is invisible to it.
-- The **bot DM reply** appends `⚠️ …(제목/태그는 기본값)` when enrichment was attempted and failed,
-  naming a usage limit specifically. This is the only surface the owner sees on a phone. It stays
-  quiet when enrichment succeeds, and when `CLAUDE_ENABLED=false` (a deliberate choice, not a
-  fault — no need to nag on every note).
+- The **bot DM reply** appends `⚠️ …(제목/태그는 기본값)` when a *non-limit* enrichment failure
+  degraded the note. This is the only surface the owner sees on a phone. It stays quiet when
+  enrichment succeeds, and when `CLAUDE_ENABLED=false` (a deliberate choice, not a fault — no need
+  to nag on every note). A usage limit no longer degrades: it defers (see the usage-limit policy).
 
 Tests: `test_claude_cli.py` drives the **real subprocess path** against a fake `claude` script on
 disk (argv, stdin delivery, resume, exit codes, timeout+kill, missing binary, off-PATH resolution)
 — no model runs. `test_parsing.py`, `test_prompts.py`, the enrichment/fallback cases in
 `test_text_handler.py`, and the `claude-engine` probe cases in `test_health.py` cover the rest.
-Suite: 88 → 165.
+Suite: 88 → 171.
 
 ## Human-in-the-loop via session preservation
 

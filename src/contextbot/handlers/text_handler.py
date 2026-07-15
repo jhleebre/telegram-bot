@@ -16,7 +16,7 @@ from ..engine import prompts
 from ..engine.claude_cli import ClaudeCLI, ClaudeError, ClaudeUsageLimit, build_engine
 from ..engine.parsing import ParseError, extract_json_object
 from ..notes.markdown_writer import write_note
-from .base import HandlerResult, IncomingMessage
+from .base import DeferMessage, HandlerResult, IncomingMessage
 
 logger = logging.getLogger("contextbot.handlers.text")
 
@@ -126,9 +126,10 @@ async def handle_text(
         try:
             enrichment = await enrich(text, engine)
         except ClaudeUsageLimit as exc:
-            # Can persist for hours, so say so plainly rather than looking like a random glitch.
-            logger.warning("text enrichment hit a usage limit, using fallback: %s", exc)
-            degraded = "사용량 제한으로 LLM 보강을 건너뛰었습니다"
+            # Transient and time-bound: defer rather than save a weaker note the owner would have
+            # to find and fix later. Nothing is written yet, so the replay starts clean.
+            logger.warning("usage limit reached; deferring message %s: %s", message.message_id, exc)
+            raise DeferMessage(str(exc)) from exc
         except (ClaudeError, ParseError) as exc:
             # Expected failure modes (no CLI, timeout, non-JSON reply): degrade, don't fail.
             logger.warning("text enrichment unavailable, using fallback: %s", exc)

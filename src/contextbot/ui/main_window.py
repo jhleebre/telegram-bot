@@ -168,7 +168,9 @@ class MainWindow(QWidget):
 
     def _on_status_changed(self, status_value: str, message: str) -> None:
         self._status_widget.set_status_value(status_value, message)
-        if status_value == BotStatus.ERROR.value:
+        # Follow STOPPED too, not just ERROR: the bot can stop itself (e.g. a usage limit halts
+        # it), and leaving the button on "Stop" would force a dead click before Start works.
+        if status_value in (BotStatus.ERROR.value, BotStatus.STOPPED.value):
             self._set_running_style(False)
 
     def _on_error(self, message: str) -> None:

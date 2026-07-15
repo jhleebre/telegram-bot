@@ -14,6 +14,25 @@ from pathlib import Path
 from typing import Optional, Protocol
 
 
+class DeferMessage(Exception):
+    """Raised by a handler when a message cannot be processed *now* but will succeed later.
+
+    The client responds by leaving the high-water-mark unadvanced, stopping, and showing why. The
+    owner restarts once the condition clears, and catch-up replays the message from where it left
+    off. Deferring is lossless: the message stays in Saved Messages, which is the durable input.
+
+    Raise this **only for transient, time-bound** failures — currently just an exhausted Claude
+    usage limit, which resets on a fixed window.
+
+    Do **not** raise it for permanent failures (a corrupt file, a missing CLI, a bug in our code).
+    Those recur on every retry, so halting would stop the bot again on each Start and wedge it
+    forever. Let those surface as ordinary exceptions: the client skips the message and reports it.
+
+    Handlers must raise this **before** any side effect (writing a note, moving or deleting the
+    original), because the replay re-runs the handler from the start.
+    """
+
+
 class MessageKind(str, Enum):
     TEXT = "text"
     AUDIO = "audio"
