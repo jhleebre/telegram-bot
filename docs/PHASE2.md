@@ -1,4 +1,4 @@
-# Phase 2 — Development Plan (increment 1 of 5 shipped)
+# Phase 2 — Development Plan (increments 1–2 of 5 shipped)
 
 Phase 2 adds the LLM/VLM-powered pipelines on top of the Phase 1 skeleton. The engine is
 **Claude Code in headless mode** (`claude -p`), and multi-turn human-in-the-loop review is built
@@ -7,8 +7,9 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 
 > **Picking this up in a fresh session?** Read, in order: this header → *Delivery approach* →
 > *Increment 1 (as built)* (the engine's contract and the three real-world bugs it hit) →
-> *Usage-limit policy* (binding on every later increment) → *Next up: increment 2*.
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **171 passing**, no network or model runs.
+> *Increment 2 (as built)* (the file pipelines and the isolation the PDF route depends on) →
+> *Usage-limit policy* (binding on every later increment) → *Next up: increment 3*.
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **254 passing**, no network or model runs.
 
 **Ingestion recap (from the Phase 1 hybrid):** input files arrive via **Saved Messages** (Telethon)
 and are downloaded to a temp dir with `message.download_media(...)`. The **review conversation runs
@@ -33,8 +34,9 @@ Recommended order (each is a self-contained milestone — ship and verify before
 - [x] **1. `claude -p` engine** (`engine/claude_cli.py`) — the shared subprocess wrapper + a trivial
       smoke use (e.g. LLM-enriched text title/tags). Nothing else depends on this until it works.
       **Shipped** — see "Increment 1 (as built)" below.
-- [ ] **2. PDF → Markdown** (`document_handler` + `files/originals.py`) — no review loop, no
+- [x] **2. PDF → Markdown** (`document_handler` + `files/originals.py`) — no review loop, no
       converter, no new dependency; simplest file pipeline. Includes `.md` passthrough.
+      **Shipped** — see "Increment 2 (as built)" below.
 - [ ] **3. Image → described note** (`image_handler`, VLM via `claude -p`) — still no review loop.
 - [ ] **4. Human-in-the-loop plumbing** (`core/session_store.py`, `handlers/conversation.py`, bot-DM
       polling) — build and test the review state machine on a simple case first.
@@ -44,11 +46,18 @@ Recommended order (each is a self-contained milestone — ship and verify before
 Rationale: features 2–3 are one-shot and low-risk, so they validate the engine (1) before the
 harder two-way review flow (4) and the STT-heavy audio pipeline (5) are attempted.
 
-### Next up: increment 2 — PDF → Markdown
+### Increment 2 (as built) — PDF → Markdown
 
-Scope: `handlers/document_handler.py` (currently a stub) + `files/originals.py`. No review loop, no
-converter module, no new dependency. Build the **`.md` passthrough (item D) first** — no LLM, a few
-lines, and it proves the routing end-to-end before any PDF work.
+Delivered: `handlers/document_handler.py` (five routes), `files/originals.py`, `files/text_files.py`,
+`engine/prompts/pdf_to_markdown.md`, the `DOWNLOADS_DIR` setting, and `ClaudeCLI.run(cwd=…)`.
+Suite: 171 → **254**.
+
+**The decisions recorded below were all made before building, and every one of them held.** They
+are kept as the *why*; the "As built" subsection at the end of this section is the *what*.
+
+Scope was: `handlers/document_handler.py` (was a stub) + `files/originals.py`. No review loop, no
+converter module, no new dependency. The **`.md` passthrough (item D) was built first** — no LLM, a
+few lines, and it proved the routing end-to-end before any PDF work.
 
 **Decision 3 is resolved: PDF only. Claude Code reads the PDF natively; the owner exports to PDF
 from MS Office and sends that.** Everything below was probed against the real CLI on the same
@@ -133,16 +142,75 @@ Two landmines for whoever builds this:
 - **Size.** A large `.csv` should not become a giant note. Cap it, and say so in the reply rather
   than writing something unusable.
 
+#### As built
+
+`handle_document` dispatches on **extension**, into five routes:
+
+| Route | Body comes from | LLM | Original |
+|-------|-----------------|-----|----------|
+| `.md` | the file, byte-for-byte | never called | none — it *is* the note |
+| `.txt` | the file's text | metadata only | → `~/Downloads/` |
+| `.csv` | `files/text_files.render_csv_table` (stdlib `csv`) | metadata only | → `~/Downloads/` |
+| `.pdf` | **Claude** (`Read`s the PDF natively) | body + title | → `~/Downloads/` |
+| else | — | never called | never even downloaded |
+
+Points worth knowing before touching this:
+
+- **Isolation is `cwd` + `--add-dir`, not `--add-dir` alone.** `ClaudeCLI.run` gained a `cwd`
+  parameter for this. Without it the subprocess inherits the *app's* working directory — the
+  project tree — which is exactly the pile of neighbouring files the model was observed to
+  fabricate from. The PDF is staged alone in a `TemporaryDirectory` that is both the job's `cwd`
+  and its only `--add-dir`. `test_pdf_is_staged_alone_in_an_isolated_dir` asserts the directory
+  listing *as the model would see it*, at call time.
+- **No new CLI flags.** No `--permission-mode`, no `--allowedTools`: the PDF route needs only
+  `Read`, which the default mode allows inside `cwd`/`--add-dir`. Increment 1's hermetic flags are
+  untouched — the note in *Increment 1 (as built)* predicting otherwise was written before the
+  PDF-only decision and no longer applies.
+- **The sentinel is checked on the first line, not by substring.** A document that legitimately
+  contains the word `CONVERSION_FAILED` (an error-code table, say) must still convert; a model that
+  leads with `CONVERSION_FAILED`, `` `CONVERSION_FAILED` ``, `# CONVERSION_FAILED`, or
+  `CONVERSION_FAILED: <excuse>` must not. Empty output counts as failure too.
+- **`enrich_or_fallback` is now the shared enrichment entry point** in `text_handler`, used by both
+  `handle_text` and the `.txt`/`.csv` route. It raises `DeferMessage` on a usage limit and swallows
+  everything else into a `degraded` reason, which is what keeps the "call it before any side
+  effect" rule enforceable in one place.
+- **`.md` filenames are normalized** to the vault's `YYMMDD-HHMM-<slug>.md`, so a sent note sorts
+  into the inbox with the rest. Only the *name* changes — the content is written byte-for-byte,
+  frontmatter and all. (`.markdown` becomes `.md`.)
+- **Caps** (all in `document_handler`): 2MB per file, 200 CSV rows, 50,000 characters of `.txt`.
+  Truncation is reported in the reply *and* in the note body, because the full file is in
+  `~/Downloads` — a capped note is a preview, not a loss.
+- **Encoding order is `utf-8-sig` → `cp949`, plus UTF-16 when a BOM says so.** `latin-1` is
+  deliberately absent as a last resort: it decodes any byte sequence, which would convert a
+  failure we report into mojibake we do not.
+- **Degradation, per route** (settling the "decide when each increment is built" row): `.txt`/`.csv`
+  degrade exactly like text (the body is already the note; only frontmatter is weaker). **`.pdf`
+  has no fallback** — rendering the page *is* the LLM's job — so a non-limit failure writes **no
+  note**, replies with the reason, and still files the original to `~/Downloads`. Same for the
+  sentinel, and for `CLAUDE_ENABLED=false`.
+- **A decode failure or an oversized file replies and advances** (permanent, per the usage-limit
+  policy's table) rather than raising — but the original is still moved, so the owner gets the file
+  back either way.
+
+**Verification status.** Everything except the model's actual conversion was driven for real: the
+`.md` / `.txt` / `.csv` / unsupported routes end-to-end with real files (including a CP949 CRLF CSV
+written the way Excel writes one), and the PDF route end-to-end against the real `claude` binary —
+which in a *nested* Claude Code session cannot authenticate (`Not logged in · Please run /login`,
+`is_error: true`, `api_error_status: null`). That accidentally proved the non-limit degradation
+path against the real CLI: no note, reason in the reply, original filed. It also means **the
+conversion quality itself is owner-verified only** — a fresh session cannot probe it from inside
+Claude Code.
+
 ## Scope
 
 | Input | Output | Original file |
 |-------|--------|---------------|
 | Audio (m4a/wav/mp3/voice) | Meeting note (glossary-corrected, reviewed) → `0_inbox` | deleted after success |
 | Image (screen capture) | Description + OCR note, original embedded → `0_inbox` | kept (embedded/`.assets`) |
-| **PDF** | Markdown (Claude reads the PDF natively) → `0_inbox` | **moved to `~/Downloads/`** |
-| docx / pptx / xlsx / … | **out of scope** — the owner exports to PDF from MS Office and sends that | — |
-| txt / csv | Markdown note (csv → table, rendered deterministically) → `0_inbox` | **moved to `~/Downloads/`** |
-| Markdown (`.md`) | Saved as-is → `0_inbox` | is the note |
+| **PDF** | ✅ **shipped** — Markdown (Claude reads the PDF natively) → `0_inbox` | **moved to `~/Downloads/`** |
+| docx / pptx / xlsx / … | ✅ **shipped** — **out of scope by decision**: reply asking for a PDF export | — |
+| txt / csv | ✅ **shipped** — Markdown note (csv → table, rendered deterministically) → `0_inbox` | **moved to `~/Downloads/`** |
+| Markdown (`.md`) | ✅ **shipped** — saved as-is → `0_inbox` | is the note |
 | Text (upgrade) | ✅ **shipped** — LLM-enriched title/tags/summary (fallback = Phase 1 path) | — |
 
 ## New modules
@@ -152,16 +220,17 @@ src/contextbot/
 ├── engine/                 # ✅ built in increment 1
 │   ├── claude_cli.py       # wrapper over `claude -p` (async subprocess, JSON parse, resolution)
 │   ├── parsing.py          # recover a JSON object from a model's free-text reply
-│   └── prompts/            # prompt templates: text_enrich ✅ / meeting / image / doc-convert
+│   └── prompts/            # templates: text_enrich ✅ / pdf_to_markdown ✅ / meeting / image
 ├── core/
 │   └── session_store.py    # per-chat conversation state + Claude session_id persistence
 ├── handlers/
 │   ├── audio_handler.py    # (fill in) audio → meeting note
 │   ├── image_handler.py    # (fill in) image → described note
-│   ├── document_handler.py # (fill in) pdf → markdown; .md passthrough
+│   ├── document_handler.py # ✅ built in increment 2 — md / txt / csv / pdf / unsupported
 │   └── conversation.py     # routes a plain-text reply into an active pending session
-└── files/
-    └── originals.py        # original-file policy (Downloads / delete / embed)
+└── files/                  # ✅ built in increment 2
+    ├── originals.py        # original-file policy (Downloads / delete / embed)
+    └── text_files.py       # encoding detection + deterministic CSV → Markdown table
 ```
 
 Additional runtime deps: `mlx-whisper` (STT, Apple Silicon) — **and nothing else**. Documents need
@@ -201,10 +270,13 @@ Design points that differ from / firm up the sketch above:
 - **No permission mode is needed** (open decision 1, resolved → *bot writes*): the engine is
   text-in / text-out and Claude is never granted write access. `--add-dir` remains available for
   read-only context (the glossary, in increment 5).
-  **Superseded for increment 2 onward:** that holds only while the input *is* the prompt. A document
-  must be read from disk, and with the default permission mode every Bash attempt is denied — so
-  `ClaudeCLI.run` will need to expose `--permission-mode` / `--allowedTools`. "The bot writes the
-  note" still stands; "Claude needs no tools" does not. See *Next up: increment 2*.
+  **Amended by increment 2 (as built):** an intermediate draft of this bullet predicted that
+  reading a document would force `ClaudeCLI.run` to expose `--permission-mode` / `--allowedTools`.
+  It did not — that was true only of the abandoned shell-driven `.docx` route. The default mode
+  allows `Read` inside `cwd`/`--add-dir`, so **no permission mode and no new flags are used**, and
+  the hermetic flags are unchanged. What increment 2 *did* need was `run(cwd=…)`, so the job runs
+  in the isolated staging dir. "The bot writes the note" stands; "Claude needs no tools beyond
+  `Read`" stands.
 - **Result JSON shape** (verified, CLI v2.1.187): `{result, session_id, is_error, subtype,
   total_cost_usd, duration_ms, num_turns}` → `ClaudeResult`. Errors surface as `ClaudeUnavailable`
   (no CLI), `ClaudeTimeout` (killed at the deadline), `ClaudeError` (non-zero exit / non-JSON /
@@ -305,7 +377,7 @@ failure, and text is the only one with a real no-LLM path:
 | Pipeline | If the engine fails for a non-limit reason |
 |----------|-------------------------------------------|
 | Text (1) | ✅ Phase 1 path; note keeps full fidelity, only metadata is weaker |
-| Document (2) | Deterministic converter output can still be saved un-refined — degrade like text |
+| Document (2) | ✅ **decided when built, and it splits.** `.txt`/`.csv` degrade like text (the body is the file, so only frontmatter weakens). `.pdf` has **no fallback** — the LLM *is* the converter — so: no note, reply with the reason, original still filed to `~/Downloads` |
 | Image (3) | No fallback: a described note *is* the LLM output. Save the image + a stub note? |
 | Audio (5) | **No fallback.** STT is local, so the transcript survives — but the meeting note does not. Saving the raw transcript beats losing the recording. |
 | Review (4) | A failure mid-review would strand a session in `AWAITING_REVIEW`. The state machine must handle "cannot resume right now" without dropping the draft. |
@@ -338,6 +410,10 @@ disk (argv, stdin delivery, resume, exit codes, timeout+kill, missing binary, of
 — no model runs. `test_parsing.py`, `test_prompts.py`, the enrichment/fallback cases in
 `test_text_handler.py`, and the `claude-engine` probe cases in `test_health.py` cover the rest.
 Suite: 88 → 171.
+
+Increment 2 adds `test_document_handler.py` (all five routes, the sentinel variants, staging
+isolation, deferral-leaves-no-side-effect for both `.pdf` and `.txt`), `test_text_files.py`
+(CP949/UTF-16 decoding, CSV escaping and caps), and `test_originals.py`. Suite: 171 → 254.
 
 ## Human-in-the-loop via session preservation
 
@@ -381,6 +457,22 @@ IDLE ──job needs review──▶ AWAITING_REVIEW ──owner reply (bot DM)�
   image path for a detailed description + OCR. Write a note **embedding the original image**
   (relative link) plus the description/OCR to `0_inbox`. (No review loop unless the user wants
   one.)
+
+### Next up: increment 3 — image → described note
+
+Scope: `handlers/image_handler.py` (still a stub) + the `image` prompt template. Still no review
+loop. Inherited from increment 2 and not up for re-litigation:
+
+- **`files/originals.py` is where the original-file policy lives.** Images are *kept* (embedded),
+  not moved — add the policy there rather than in the handler.
+- **`ClaudeCLI.run(cwd=…, add_dirs=[…])` is how a file reaches the model.** An image is read from
+  disk exactly as a PDF is, so stage it the same way: alone, in a temp dir that is both `cwd` and
+  the only `--add-dir`. The fabrication risk is identical.
+- **Side effects after the last LLM call**, and a usage limit raises `DeferMessage` first.
+- Item B below already asks the open question: with no fallback (a described note *is* the LLM
+  output), does a non-limit failure save the image with a stub note, or nothing at all? Increment 2
+  answered the same question for PDF with *nothing at all, and say why* — the image case differs in
+  that the original is worth keeping regardless.
 
 ## C. PDF → Markdown
 

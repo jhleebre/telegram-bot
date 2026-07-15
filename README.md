@@ -30,10 +30,14 @@ client can read Saved Messages history, which removes the 24h limit entirely.
   - ✅ **1. `claude -p` engine** — shared headless-CLI wrapper, plus its first use: text notes now
     get an **LLM-derived title, tags, and summary**. Falls back to the Phase 1 path (first line as
     title) when the CLI is missing, slow, or disabled, so the bot still works offline.
-  - ⬜ 2. **PDF** → Markdown · ⬜ 3. images → described notes ·
-    ⬜ 4. human-in-the-loop review plumbing · ⬜ 5. audio → meeting notes
+  - ✅ **2. Documents → Markdown** — send a **PDF** and Claude Code reads it natively into a
+    Markdown note; **`.txt`/`.csv`** become notes too (CSV tables are rendered exactly, never
+    retyped by a model), and a **`.md`** file is saved as-is. Originals are filed to
+    `~/Downloads/`. Anything else (docx/pptx/xlsx) gets a reply asking for a PDF export.
+  - ⬜ 3. images → described notes · ⬜ 4. human-in-the-loop review plumbing ·
+    ⬜ 5. audio → meeting notes
 
-  Audio/image/document still reply "Phase 2 예정". See [docs/PHASE2.md](docs/PHASE2.md).
+  Audio and images still reply "Phase 2 예정". See [docs/PHASE2.md](docs/PHASE2.md).
 
   **Documents are PDF-only by design.** Export from Word/PowerPoint to PDF and send that — Claude
   Code reads PDFs natively, so the bot needs no converter, no extra dependency, and never has to
@@ -148,7 +152,8 @@ src/contextbot/
 │   ├── claude_cli.py     # async wrapper over headless `claude -p` (JSON result, sessions)
 │   ├── parsing.py        # recover a JSON object from a model's free-text reply
 │   └── prompts/          # prompt templates (*.md)
-├── handlers/             # text handler (+ LLM enrichment) + Phase 2 stubs
+├── handlers/             # text + document handlers (audio/image are Phase 2 stubs)
+├── files/                # original-file policy (→ Downloads) + encoding / CSV rendering
 ├── notes/                # frontmatter, filename, atomic markdown writer
 └── ui/                   # PySide6 window + asyncio worker thread
 login.py                  # one-time interactive login (user-run)

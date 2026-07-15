@@ -5,6 +5,7 @@ These drive the real subprocess path against a fake `claude` script (see conftes
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
@@ -69,6 +70,32 @@ async def test_system_prompt_and_add_dirs(make_claude, claude_calls, tmp_path):
     argv = claude_calls()[0]["argv"]
     assert argv[argv.index("--system-prompt") + 1] == "be terse"
     assert [argv[i + 1] for i, v in enumerate(argv) if v == "--add-dir"] == [str(a), str(b)]
+
+
+def _prints_cwd() -> str:
+    return f"import os\nprint(json.dumps({{**{SUCCESS_RESULT!r}, 'result': os.getcwd()}}))"
+
+
+async def test_per_call_cwd_runs_the_job_there(make_claude, tmp_path):
+    """A job that reads a staged file must run *in* that directory, not the app's own."""
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    script = make_claude(_prints_cwd())
+
+    result = await _cli(script).run("hi", cwd=stage)
+
+    assert Path(result.text).resolve() == stage.resolve()
+
+
+async def test_per_call_cwd_overrides_the_engine_default(make_claude, tmp_path):
+    stage, default = tmp_path / "stage", tmp_path / "default"
+    stage.mkdir()
+    default.mkdir()
+    script = make_claude(_prints_cwd())
+
+    result = await _cli(script, cwd=default).run("hi", cwd=stage)
+
+    assert Path(result.text).resolve() == stage.resolve()
 
 
 async def test_resume_passes_session_id(make_claude, claude_calls):

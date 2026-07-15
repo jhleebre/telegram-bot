@@ -88,7 +88,17 @@ async def test_route_audio_is_stub(settings):
     assert not list(settings.inbox_dir.iterdir())
 
 
-async def test_route_markdown_is_stub(settings):
-    msg = build_incoming_message(document_message(22, "x.md", "text/markdown"))
+async def test_route_markdown_saves_the_file(settings):
+    msg = build_incoming_message(document_message(22, "x.md", "text/markdown", content=b"# routed"))
     result = await route(msg, settings)
-    assert "Phase 2" in result.reply
+
+    assert result.saved_path is not None
+    assert result.saved_path.read_text(encoding="utf-8") == "# routed"
+
+
+async def test_route_unsupported_document_asks_for_a_pdf(settings):
+    msg = build_incoming_message(document_message(23, "deck.pptx", content=b"data"))
+    result = await route(msg, settings)
+
+    assert result.saved_path is None
+    assert "PDF로 내보내서" in result.reply

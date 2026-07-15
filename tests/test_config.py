@@ -25,6 +25,22 @@ def test_load_valid(tmp_path):
     assert settings.log_level == "INFO"
 
 
+def test_downloads_dir_defaults_to_home(tmp_path):
+    settings = Settings.load(_base_env(tmp_path), use_dotenv=False)
+    assert settings.downloads_dir == Path("~/Downloads").expanduser()
+
+
+def test_downloads_dir_override(tmp_path):
+    env = _base_env(tmp_path) | {"DOWNLOADS_DIR": "~/Files/in"}
+    assert Settings.load(env, use_dotenv=False).downloads_dir == Path("~/Files/in").expanduser()
+
+
+def test_downloads_dir_need_not_exist_yet(tmp_path):
+    """Unlike the inbox, it is created on demand — a missing dir is not a config error."""
+    env = _base_env(tmp_path) | {"DOWNLOADS_DIR": str(tmp_path / "nope" / "Downloads")}
+    assert Settings.load(env, use_dotenv=False).downloads_dir.name == "Downloads"
+
+
 def test_default_session_path(tmp_path):
     settings = Settings.load(_base_env(tmp_path), use_dotenv=False)
     assert settings.session_path.name == "contextbot.session"

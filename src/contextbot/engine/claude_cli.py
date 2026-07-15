@@ -194,12 +194,20 @@ class ClaudeCLI:
         session_id: str | None = None,
         resume: str | None = None,
         timeout_sec: float | None = None,
+        cwd: Path | None = None,
     ) -> ClaudeResult:
         """Run one headless job and return its parsed result.
 
         ``resume`` continues an existing session (Phase 2 review turns); ``session_id`` pins a new
-        session to a caller-chosen UUID. Raises :class:`ClaudeUnavailable`, :class:`ClaudeTimeout`,
-        or :class:`ClaudeError`.
+        session to a caller-chosen UUID.
+
+        ``cwd`` overrides the engine's working directory for this job. A job that reads a file must
+        set it to the directory that file was staged in: otherwise the subprocess inherits the
+        *app's* cwd, and Claude — which fabricates from a neighbouring file rather than admitting
+        it cannot read the one it was asked for — has the whole project tree in reach. Pair it with
+        ``add_dirs`` so the staged directory is the only thing readable.
+
+        Raises :class:`ClaudeUnavailable`, :class:`ClaudeTimeout`, or :class:`ClaudeError`.
         """
         executable = self.resolve()
         if executable is None:
@@ -216,6 +224,7 @@ class ClaudeCLI:
             session_id=session_id,
         )
         budget = timeout_sec if timeout_sec is not None else self.timeout_sec
+        workdir = cwd if cwd is not None else self.cwd
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -223,7 +232,7 @@ class ClaudeCLI:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.cwd) if self.cwd else None,
+                cwd=str(workdir) if workdir else None,
             )
         except FileNotFoundError as exc:  # raced with is_available, or bad absolute path
             raise ClaudeUnavailable(f"{self.executable!r} could not be executed") from exc

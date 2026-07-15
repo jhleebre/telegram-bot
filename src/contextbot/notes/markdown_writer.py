@@ -12,6 +12,28 @@ from .frontmatter import build_frontmatter, render_note
 from .naming import build_filename, unique_path
 
 
+def write_text(*, directory: Path, filename: str, content: str) -> Path:
+    """Atomically write ``content`` to a non-colliding path in ``directory``; return the path.
+
+    Content goes to a temp file in the same directory, then ``os.replace`` moves it into place, so
+    a reader never sees a half-written note.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    target = unique_path(directory, filename)
+
+    fd, tmp_name = tempfile.mkstemp(dir=str(directory), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp_name, target)
+    except BaseException:
+        # Clean up the temp file on any failure so we never leave `.tmp` litter behind.
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+        raise
+    return target
+
+
 def write_note(
     *,
     inbox_dir: Path,
@@ -26,11 +48,9 @@ def write_note(
 ) -> Path:
     """Render and atomically write a note; return the final path.
 
-    ``slug_source`` controls the filename slug (defaults to ``title``). The write is atomic:
-    content goes to a temp file in the same directory, then ``os.replace`` moves it into place.
+    ``slug_source`` controls the filename slug (defaults to ``title``). The write is atomic
+    (see :func:`write_text`).
     """
-    inbox_dir.mkdir(parents=True, exist_ok=True)
-
     frontmatter = build_frontmatter(
         title=title,
         date=when,
@@ -39,19 +59,8 @@ def write_note(
         tags=tags,
         extra=extra,
     )
-    content = render_note(frontmatter, body)
-
-    filename = build_filename(slug_source if slug_source is not None else title, when)
-    target = unique_path(inbox_dir, filename)
-
-    fd, tmp_name = tempfile.mkstemp(dir=str(inbox_dir), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(content)
-        os.replace(tmp_name, target)
-    except BaseException:
-        # Clean up the temp file on any failure so we never leave `.tmp` litter behind.
-        if os.path.exists(tmp_name):
-            os.unlink(tmp_name)
-        raise
-    return target
+    return write_text(
+        directory=inbox_dir,
+        filename=build_filename(slug_source if slug_source is not None else title, when),
+        content=render_note(frontmatter, body),
+    )

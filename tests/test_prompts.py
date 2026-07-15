@@ -15,6 +15,22 @@ def test_render_keeps_literal_json_braces():
     assert '{"title": "...", "tags": ["...", "..."], "summary": "..."}' in out
 
 
+def test_pdf_template_carries_the_path_and_sentinel():
+    out = prompts.render(
+        "pdf_to_markdown", path="/tmp/stage/report.pdf", sentinel="CONVERSION_FAILED"
+    )
+    assert "/tmp/stage/report.pdf" in out
+    assert "CONVERSION_FAILED" in out
+    assert "{" not in out and "}" not in out
+
+
+def test_pdf_template_forbids_substituting_another_source():
+    """The fabrication guard is the prompt's job; the sentinel check is only the backstop."""
+    out = prompts.render("pdf_to_markdown", path="/x.pdf", sentinel="S")
+    assert "only file in its directory" in out
+    assert "Do not read any other file" in out
+
+
 def test_unknown_template_raises():
     with pytest.raises(prompts.PromptNotFound):
         prompts.load("no_such_template")

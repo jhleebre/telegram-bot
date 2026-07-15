@@ -4,6 +4,11 @@ Phase 2 adds an optional LLM enrichment pass (`claude -p` → title / tags / sum
 strictly an *upgrade*: any failure — CLI missing, timeout, bad JSON, enrichment disabled — falls
 back to the Phase 1 behaviour (first line as title, no tags), so the note is never lost and the
 bot still works offline.
+
+:func:`enrich_or_fallback` is the shared entry point: the document handler reuses it for the
+text-like formats (`.txt` / `.csv`), which are notes whose body happens to come from a file. The
+boundary it enforces is the same everywhere — **the body is always the original, the model only
+supplies frontmatter.**
 """
 
 from __future__ import annotations
@@ -53,7 +58,8 @@ def _derive_title(text: str) -> str:
     return "Untitled note"
 
 
-def _clean_title(value: object) -> str | None:
+def clean_title(value: object) -> str | None:
+    """Normalize a title candidate (any type), or None when nothing usable remains."""
     if not isinstance(value, str):
         return None
     title = value.strip().strip('"').rstrip(".")
@@ -97,7 +103,7 @@ async def enrich(text: str, engine: ClaudeCLI) -> Enrichment | None:
     )
     data = extract_json_object(result.text)
 
-    title = _clean_title(data.get("title"))
+    title = clean_title(data.get("title"))
     if title is None:
         # Without a usable title there is nothing to gain over the first-line fallback.
         return None
@@ -106,6 +112,39 @@ async def enrich(text: str, engine: ClaudeCLI) -> Enrichment | None:
         tags=_clean_tags(data.get("tags")),
         summary=_clean_summary(data.get("summary")),
     )
+
+
+async def enrich_or_fallback(
+    text: str,
+    settings: Settings,
+    *,
+    engine: ClaudeCLI | None = None,
+    message_id: int | None = None,
+) -> tuple[Enrichment | None, str | None]:
+    """Enrich ``text``, returning ``(enrichment, degraded_reason)``.
+
+    Returns ``(None, None)`` when enrichment is switched off (a deliberate choice, not a fault)
+    and ``(None, reason)`` when it failed and the caller should fall back. The only exception it
+    raises is :class:`DeferMessage`, for a usage limit — callers must therefore call this **before
+    any side effect**, since a deferred message replays the handler from scratch.
+    """
+    if not settings.claude_enabled:
+        return None, None
+
+    engine = engine or build_engine(settings)
+    try:
+        return await enrich(text, engine), None
+    except ClaudeUsageLimit as exc:
+        # Transient and time-bound: defer rather than save a weaker note the owner would have
+        # to find and fix later. Nothing is written yet, so the replay starts clean.
+        logger.warning("usage limit reached; deferring message %s: %s", message_id, exc)
+        raise DeferMessage(str(exc)) from exc
+    except (ClaudeError, ParseError) as exc:
+        # Expected failure modes (no CLI, timeout, non-JSON reply): degrade, don't fail.
+        logger.warning("text enrichment unavailable, using fallback: %s", exc)
+    except Exception:  # pragma: no cover - defensive: never lose a note to enrichment
+        logger.exception("text enrichment raised unexpectedly, using fallback")
+    return None, "LLM 보강에 실패했습니다"
 
 
 async def handle_text(
@@ -119,24 +158,9 @@ async def handle_text(
     if not text:
         return HandlerResult(reply="빈 메시지는 저장하지 않았습니다.")
 
-    enrichment: Enrichment | None = None
-    degraded: str | None = None
-    if settings.claude_enabled:
-        engine = engine or build_engine(settings)
-        try:
-            enrichment = await enrich(text, engine)
-        except ClaudeUsageLimit as exc:
-            # Transient and time-bound: defer rather than save a weaker note the owner would have
-            # to find and fix later. Nothing is written yet, so the replay starts clean.
-            logger.warning("usage limit reached; deferring message %s: %s", message.message_id, exc)
-            raise DeferMessage(str(exc)) from exc
-        except (ClaudeError, ParseError) as exc:
-            # Expected failure modes (no CLI, timeout, non-JSON reply): degrade, don't fail.
-            logger.warning("text enrichment unavailable, using fallback: %s", exc)
-            degraded = "LLM 보강에 실패했습니다"
-        except Exception:  # pragma: no cover - defensive: never lose a note to enrichment
-            logger.exception("text enrichment raised unexpectedly, using fallback")
-            degraded = "LLM 보강에 실패했습니다"
+    enrichment, degraded = await enrich_or_fallback(
+        text, settings, engine=engine, message_id=message.message_id
+    )
 
     title = enrichment.title if enrichment else _derive_title(text)
     tags = enrichment.tags if enrichment else []

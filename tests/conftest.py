@@ -38,6 +38,8 @@ def settings(inbox: Path, tmp_path: Path) -> Settings:
         session_path=tmp_path / "state" / "contextbot.session",
         telegram_bot_token="123:TEST",
         inbox_dir=inbox,
+        # Never the real ~/Downloads: document handlers move originals here.
+        downloads_dir=tmp_path / "Downloads",
         owner_chat_id=None,
         log_level="INFO",
         # Off by default so handler tests exercise the no-LLM path unless they opt in.
@@ -148,7 +150,9 @@ class FakeTMessage:
         file: FakeFile | None = None,
         chat_id: int = OWNER_ID,
         sender_id: int = OWNER_ID,
+        content: bytes = b"",
     ):
+        self.content = content
         self.id = id
         self.raw_text = raw_text
         self.message = raw_text
@@ -160,6 +164,11 @@ class FakeTMessage:
         self.file = file
         self.chat_id = chat_id
         self.sender_id = sender_id
+
+    async def download_media(self, file):
+        """Stand in for Telethon's download: write the canned bytes where the handler asked."""
+        Path(file).write_bytes(self.content)
+        return file
 
 
 def text_message(id: int, text: str, **kw) -> FakeTMessage:
