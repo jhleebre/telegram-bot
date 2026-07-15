@@ -9,7 +9,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from ..engine.claude_cli import resolve_executable
+from ..engine.claude_cli import build_engine, resolve_executable
 
 
 class HealthStatus(str, Enum):
@@ -64,21 +64,35 @@ def _inbox_writable(inbox_dir: Path) -> ProbeResult:
     return ProbeResult("inbox", True, str(inbox_dir))
 
 
-def _claude_engine(settings) -> ProbeResult:
+async def _claude_engine(settings) -> ProbeResult:
     """Probe the Phase 2 LLM engine.
 
     Never fatal: notes are still captured without it (handlers fall back to the no-LLM path), so a
-    missing CLI is DEGRADED, not ERROR. Reporting the resolved path here makes an otherwise silent
-    fallback visible in the UI — a Dock-launched app inherits a minimal PATH and can miss a
-    `claude` that works fine in the terminal.
+    missing CLI or a logged-out one is DEGRADED, not ERROR.
+
+    Two failure modes are surfaced here, both otherwise silent:
+
+    - **Not findable.** A Dock-launched app inherits a minimal PATH and can miss a `claude` that
+      works in the terminal (the increment-1 bug). Reporting the resolved path makes it visible.
+    - **Findable but logged out.** A resolvable binary whose login has expired fails every job in
+      ~50ms with `Not logged in`, indistinguishable downstream from a working engine — this is what
+      bit the first PDF run. `check_auth` catches it with a local, no-usage `auth status` call.
     """
     if not settings.claude_enabled:
         return ProbeResult("claude-engine", True, "disabled (CLAUDE_ENABLED=false)")
-    resolved = resolve_executable(settings.claude_bin)
+    engine = build_engine(settings)
+    resolved = engine.resolve()
     if resolved is None:
         return ProbeResult(
             "claude-engine", False, f"{settings.claude_bin!r} not found — notes saved without LLM"
         )
+    if await engine.check_auth() is False:
+        return ProbeResult(
+            "claude-engine",
+            False,
+            f"{resolved} — logged out (run: claude, then /login)",
+        )
+    # None (undeterminable) is treated as OK: don't cry wolf when we can't tell.
     return ProbeResult("claude-engine", True, f"{resolved} ({settings.claude_model})")
 
 
@@ -121,7 +135,7 @@ class HealthChecker:
         token = await self._token_probe()
         inbox = _inbox_writable(self._settings.inbox_dir)
         connection = self._connection_probe()
-        claude = _claude_engine(self._settings)
+        claude = await _claude_engine(self._settings)
 
         if not auth.ok or not token.ok:
             overall = HealthStatus.ERROR

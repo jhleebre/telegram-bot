@@ -9,7 +9,7 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > *Increment 1 (as built)* (the engine's contract and the three real-world bugs it hit) →
 > *Increment 2 (as built)* (the file pipelines and the isolation the PDF route depends on) →
 > *Usage-limit policy* (binding on every later increment) → *Next up: increment 3*.
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **254 passing**, no network or model runs.
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **263 passing**, no network or model runs.
 
 **Ingestion recap (from the Phase 1 hybrid):** input files arrive via **Saved Messages** (Telethon)
 and are downloaded to a temp dir with `message.download_media(...)`. The **review conversation runs
@@ -49,8 +49,9 @@ harder two-way review flow (4) and the STT-heavy audio pipeline (5) are attempte
 ### Increment 2 (as built) — PDF → Markdown
 
 Delivered: `handlers/document_handler.py` (five routes), `files/originals.py`, `files/text_files.py`,
-`engine/prompts/pdf_to_markdown.md`, the `DOWNLOADS_DIR` setting, and `ClaudeCLI.run(cwd=…)`.
-Suite: 171 → **254**.
+`engine/prompts/pdf_to_markdown.md`, the `DOWNLOADS_DIR` setting, `ClaudeCLI.run(cwd=…)`, and —
+after owner verification (below) — `ClaudeCLI.check_auth` behind an upgraded `claude-engine` health
+probe. Suite: 171 → **263**.
 
 **The decisions recorded below were all made before building, and every one of them held.** They
 are kept as the *why*; the "As built" subsection at the end of this section is the *what*.
@@ -200,6 +201,15 @@ which in a *nested* Claude Code session cannot authenticate (`Not logged in · P
 path against the real CLI: no note, reason in the reply, original filed. It also means **the
 conversion quality itself is owner-verified only** — a fresh session cannot probe it from inside
 Claude Code.
+
+**Owner verification, round 1 (the login gap).** The owner's first real PDF failed with
+`Not logged in · Please run /login` — and a plain text memo then failed the same way, proving the
+CLI's login had simply expired (this machine, not the pipeline). The code behaved correctly (no
+fabricated note, original filed, reason relayed, no halt — a login failure is not `DeferMessage`
+territory). But the `claude-engine` health probe had been green throughout, because it only checked
+that the binary was *findable*. Closed here: the probe now also runs `claude auth status --json` and
+reports **DEGRADED — logged out**. Re-login (`claude`, then `/login`) is an owner action; PDF
+conversion quality remains to be verified once logged back in.
 
 ## Scope
 
@@ -399,7 +409,9 @@ surfaces now report it:
 
 - The health panel carries a **`claude-engine`** probe showing the resolved path + model; a missing
   CLI reports **DEGRADED** (not ERROR — capture still works). It proves the binary is *findable*,
-  not that it can *run* — a usage limit is invisible to it.
+  and — since increment 2 — that it is *logged in*: the probe runs `claude auth status --json` (a
+  local, no-usage call) and reports **DEGRADED — logged out** for a resolvable-but-signed-out CLI.
+  A **usage limit is still invisible to it**, because distinguishing that would cost a real job.
 - The **bot DM reply** appends `⚠️ …(제목/태그는 기본값)` when a *non-limit* enrichment failure
   degraded the note. This is the only surface the owner sees on a phone. It stays quiet when
   enrichment succeeds, and when `CLAUDE_ENABLED=false` (a deliberate choice, not a fault — no need
@@ -413,7 +425,9 @@ Suite: 88 → 171.
 
 Increment 2 adds `test_document_handler.py` (all five routes, the sentinel variants, staging
 isolation, deferral-leaves-no-side-effect for both `.pdf` and `.txt`), `test_text_files.py`
-(CP949/UTF-16 decoding, CSV escaping and caps), and `test_originals.py`. Suite: 171 → 254.
+(CP949/UTF-16 decoding, CSV escaping and caps), and `test_originals.py`. The `check_auth` login
+probe (added during owner verification) is covered in `test_claude_cli.py` and `test_health.py`.
+Suite: 171 → 263.
 
 ## Human-in-the-loop via session preservation
 

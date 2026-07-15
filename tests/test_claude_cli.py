@@ -231,6 +231,43 @@ async def test_available_for_real_script(make_claude):
     assert _cli(make_claude("pass")).is_available()
 
 
+# ------------------------------------------------- check_auth (login probe)
+def _auth_body(payload: str) -> str:
+    """Fake `claude` that answers `auth status` with ``payload`` (or nothing), else exits 0."""
+    return f'if "auth" in sys.argv[1:]:\n    print({payload})\n'
+
+
+async def test_check_auth_true_when_logged_in(make_claude, claude_calls):
+    script = make_claude(_auth_body('json.dumps({"loggedIn": True})'))
+    assert await _cli(script).check_auth() is True
+    # It asks `auth status`, not a model run — no usage consumed.
+    assert claude_calls()[0]["argv"] == ["auth", "status", "--json"]
+
+
+async def test_check_auth_false_when_logged_out(make_claude):
+    script = make_claude(_auth_body('json.dumps({"loggedIn": False})'))
+    assert await _cli(script).check_auth() is False
+
+
+async def test_check_auth_none_on_unparseable_output(make_claude):
+    script = make_claude(_auth_body('"not json at all"'))
+    assert await _cli(script).check_auth() is None
+
+
+async def test_check_auth_none_when_field_absent(make_claude):
+    script = make_claude(_auth_body('json.dumps({"apiProvider": "firstParty"})'))
+    assert await _cli(script).check_auth() is None
+
+
+async def test_check_auth_none_when_binary_missing():
+    assert await ClaudeCLI(executable="claude-nope-xyz").check_auth() is None
+
+
+async def test_check_auth_none_on_timeout(make_claude):
+    script = make_claude('if "auth" in sys.argv[1:]:\n    time.sleep(30)\n')
+    assert await _cli(script).check_auth(timeout_sec=0.5) is None
+
+
 # ------------------------------------------------- executable resolution
 # A Dock/Finder-launched GUI app inherits launchd's minimal PATH, so a Homebrew-installed
 # `claude` that works in the terminal is invisible to a bare shutil.which lookup.

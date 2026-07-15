@@ -294,6 +294,45 @@ class ClaudeCLI:
         """Continue an existing session with a new turn (keeps full prior context)."""
         return await self.run(prompt, resume=session_id, **kwargs)
 
+    async def check_auth(self, *, timeout_sec: float = 15.0) -> bool | None:
+        """Return True if the CLI is logged in, False if it is not, None if undeterminable.
+
+        Runs ``claude auth status --json`` — a **local, no-model call that consumes no usage** — so
+        the health probe can catch a *logged-out* CLI, which a bare PATH resolution cannot see. A
+        resolvable binary that is signed out fails every ``-p`` job in ~50ms with
+        ``Not logged in``, and nothing downstream distinguishes that from a working engine.
+
+        None means "could not tell" (binary missing, call failed, unparseable output): the caller
+        should not raise a false alarm on it — only a definitive ``loggedIn: false`` is actionable.
+        """
+        executable = self.resolve()
+        if executable is None:
+            return None
+
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                executable,
+                "auth",
+                "status",
+                "--json",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+        except (OSError, asyncio.TimeoutError, asyncio.CancelledError):
+            if proc is not None:
+                await self._terminate(proc)
+            return None
+
+        try:
+            data = json.loads(stdout.decode("utf-8", errors="replace").strip())
+        except (json.JSONDecodeError, ValueError):
+            return None
+        logged_in = data.get("loggedIn") if isinstance(data, dict) else None
+        return logged_in if isinstance(logged_in, bool) else None
+
     @staticmethod
     async def _terminate(proc: asyncio.subprocess.Process) -> None:
         """Kill a still-running child and reap it, ignoring races where it already exited."""

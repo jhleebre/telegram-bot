@@ -94,3 +94,56 @@ async def test_missing_claude_is_degraded_not_error(settings):
     assert not probe.ok
     assert "not found" in probe.detail
     assert report.overall == HealthStatus.DEGRADED
+
+
+def _auth_script(logged_in) -> str:
+    """A fake `claude` that answers `auth status --json`, else exits 0 silently."""
+    payload = "None" if logged_in is None else repr({"loggedIn": logged_in})
+    return (
+        'if "auth" in sys.argv[1:]:\n'
+        f"    payload = {payload}\n"
+        "    if payload is not None:\n"
+        "        print(json.dumps(payload))\n"
+    )
+
+
+async def test_logged_out_claude_is_degraded(settings, make_claude):
+    """The gap the first PDF run exposed: a resolvable but signed-out CLI was reported green."""
+    script = make_claude(_auth_script(False))
+    client = FakeClient(authorized=True)
+    await client.connect()
+    enabled = replace(settings, claude_enabled=True, claude_bin=str(script))
+
+    report = await HealthChecker(client, FakeBot(), enabled).check()
+
+    probe = report.probe("claude-engine")
+    assert not probe.ok
+    assert "logged out" in probe.detail
+    assert report.overall == HealthStatus.DEGRADED
+
+
+async def test_logged_in_claude_is_healthy(settings, make_claude):
+    script = make_claude(_auth_script(True))
+    client = FakeClient(authorized=True)
+    await client.connect()
+    enabled = replace(settings, claude_enabled=True, claude_bin=str(script), claude_model="haiku")
+
+    report = await HealthChecker(client, FakeBot(), enabled).check()
+
+    probe = report.probe("claude-engine")
+    assert probe.ok
+    assert str(script) in probe.detail and "haiku" in probe.detail
+    assert report.overall == HealthStatus.HEALTHY
+
+
+async def test_undeterminable_auth_does_not_cry_wolf(settings, make_claude):
+    """When `auth status` gives nothing parseable, stay green — the binary is at least present."""
+    script = make_claude(_auth_script(None))
+    client = FakeClient(authorized=True)
+    await client.connect()
+    enabled = replace(settings, claude_enabled=True, claude_bin=str(script))
+
+    report = await HealthChecker(client, FakeBot(), enabled).check()
+
+    assert report.probe("claude-engine").ok
+    assert report.overall == HealthStatus.HEALTHY
