@@ -74,6 +74,14 @@ Saved Messages ──Telethon(user)──▶ catch-up + live ──▶ route()/h
 - Thereafter, the HWM is advanced to each message id **after** it is successfully processed, and
   persisted. On Start, only messages with `id > HWM` are processed (oldest-first), then live events
   take over. Catch-up/live overlap is de-duplicated by the HWM guard.
+- **Correction (made during Phase 2 increment 1):** as originally built, `_process` swallowed every
+  exception and catch-up kept going — so a later success advanced the *single* watermark past the
+  failed message, and the `id > HWM` guard then skipped it forever. **That silently lost messages.**
+  The HWM contract is now explicit: it advances on success, and on a *permanent* failure it advances
+  deliberately with a bot-DM notice (`id=N … 건너뜁니다`) so nothing disappears quietly; a
+  *transient* failure (`DeferMessage`, i.e. a Claude usage limit) leaves it untouched and halts the
+  bot, so the message replays on the next Start. See the usage-limit policy in
+  [PHASE2.md](PHASE2.md).
 - Because Saved Messages is retained indefinitely, this works across arbitrary offline gaps — the
   ~24h Bot-API limit does not apply.
 

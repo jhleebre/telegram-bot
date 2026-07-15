@@ -1,9 +1,14 @@
-# Phase 2 — Development Plan (not yet implemented)
+# Phase 2 — Development Plan (increment 1 of 5 shipped)
 
 Phase 2 adds the LLM/VLM-powered pipelines on top of the Phase 1 skeleton. The engine is
 **Claude Code in headless mode** (`claude -p`), and multi-turn human-in-the-loop review is built
 on **Claude Code resumable sessions** (`--session-id` / `--resume`). The routing table and stub
 handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few new modules.
+
+> **Picking this up in a fresh session?** Read, in order: this header → *Delivery approach* →
+> *Increment 1 (as built)* (the engine's contract and the three real-world bugs it hit) →
+> *Usage-limit policy* (binding on every later increment) → *Next up: increment 2*.
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **171 passing**, no network or model runs.
 
 **Ingestion recap (from the Phase 1 hybrid):** input files arrive via **Saved Messages** (Telethon)
 and are downloaded to a temp dir with `message.download_media(...)`. The **review conversation runs
@@ -39,6 +44,27 @@ Recommended order (each is a self-contained milestone — ship and verify before
 Rationale: features 2–3 are one-shot and low-risk, so they validate the engine (1) before the
 harder two-way review flow (4) and the STT-heavy audio pipeline (5) are attempted.
 
+### Next up: increment 2 — document files → Markdown
+
+Scope: `handlers/document_handler.py` (currently a stub), `converters/doc_to_markdown.py`,
+`files/originals.py`. No review loop. Includes the `.md` passthrough (item D), which needs no
+converter and no LLM — **build that first**, it is a few lines and proves the routing end-to-end.
+
+Decide first: **open decision 3, the base converter** — `markitdown` vs `pandoc` + `python-docx`/
+`python-pptx`/`pdfplumber` vs Claude-skill-driven. Nothing else in the increment is blocked on it.
+
+Constraints inherited from increment 1 (do not re-litigate):
+
+- **The bot writes files**, Claude returns text only (open decision 1, resolved).
+- **`DeferMessage` before any side effect.** `handle_document` must not move the original to
+  `~/Downloads/` or write the note until after the last `claude -p` call — a deferred message
+  replays the handler from scratch, so an early side effect gets duplicated. Route the original
+  through `files/originals.py` **last**.
+- **Degrade on non-limit failure** like text does: the deterministic converter output is a usable
+  note on its own, so save it un-refined rather than losing the document.
+- Resolve any new binary (`pandoc`, …) with `engine.claude_cli.resolve_executable`-style fallback,
+  **never a bare PATH lookup** — a Dock-launched app has a minimal PATH (see below).
+
 ## Scope
 
 | Input | Output | Original file |
@@ -47,15 +73,16 @@ harder two-way review flow (4) and the STT-heavy audio pipeline (5) are attempte
 | Image (screen capture) | Description + OCR note, original embedded → `0_inbox` | kept (embedded/`.assets`) |
 | pdf / pptx / docx / xlsx / … | Converted Markdown → `0_inbox` | **moved to `~/Downloads/`** |
 | Markdown (`.md`) | Saved as-is → `0_inbox` | is the note |
-| Text (upgrade) | LLM-enriched title/tags/summary (fallback = Phase 1 path) | — |
+| Text (upgrade) | ✅ **shipped** — LLM-enriched title/tags/summary (fallback = Phase 1 path) | — |
 
 ## New modules
 
 ```
 src/contextbot/
-├── engine/
-│   ├── claude_cli.py       # wrapper over `claude -p` (async subprocess, JSON parse)
-│   └── prompts/            # prompt templates: meeting / image / doc-convert
+├── engine/                 # ✅ built in increment 1
+│   ├── claude_cli.py       # wrapper over `claude -p` (async subprocess, JSON parse, resolution)
+│   ├── parsing.py          # recover a JSON object from a model's free-text reply
+│   └── prompts/            # prompt templates: text_enrich ✅ / meeting / image / doc-convert
 ├── core/
 │   └── session_store.py    # per-chat conversation state + Claude session_id persistence
 ├── handlers/

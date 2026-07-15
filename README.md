@@ -29,12 +29,24 @@ client can read Saved Messages history, which removes the 24h limit entirely.
 - **Phase 2 (in progress, one increment at a time):**
   - ✅ **1. `claude -p` engine** — shared headless-CLI wrapper, plus its first use: text notes now
     get an **LLM-derived title, tags, and summary**. Falls back to the Phase 1 path (first line as
-    title) whenever the CLI is missing, slow, or disabled, so notes are never lost and the bot
-    still works offline.
+    title) when the CLI is missing, slow, or disabled, so the bot still works offline.
   - ⬜ 2. documents (pdf/pptx/docx/…) → Markdown · ⬜ 3. images → described notes ·
     ⬜ 4. human-in-the-loop review plumbing · ⬜ 5. audio → meeting notes
 
   Audio/image/document still reply "Phase 2 예정". See [docs/PHASE2.md](docs/PHASE2.md).
+
+### What happens when the Claude usage limit runs out
+
+The bot **stops itself and leaves the message unprocessed** rather than saving a weaker note:
+
+```
+⏸ 사용량 한도 — 리셋 후 Start를 눌러주세요
+```
+
+Nothing is lost — the message stays in your Saved Messages. Once the limit resets, press **Start**
+and the bot resumes from exactly that message, in order. Claude Code usage on a Pro/Max plan draws
+from your subscription's usage limits, not from API billing, so this costs nothing beyond the
+subscription (usage credits are opt-in and off by default).
 
 ## Setup
 
