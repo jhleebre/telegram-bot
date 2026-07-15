@@ -1,4 +1,4 @@
-"""Health checks: Telethon auth, bot token, inbox writability, connection state."""
+"""Health checks: Telethon auth, bot token, inbox writability, connection state, LLM engine."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+from ..engine.claude_cli import resolve_executable
 
 
 class HealthStatus(str, Enum):
@@ -62,6 +64,24 @@ def _inbox_writable(inbox_dir: Path) -> ProbeResult:
     return ProbeResult("inbox", True, str(inbox_dir))
 
 
+def _claude_engine(settings) -> ProbeResult:
+    """Probe the Phase 2 LLM engine.
+
+    Never fatal: notes are still captured without it (handlers fall back to the no-LLM path), so a
+    missing CLI is DEGRADED, not ERROR. Reporting the resolved path here makes an otherwise silent
+    fallback visible in the UI — a Dock-launched app inherits a minimal PATH and can miss a
+    `claude` that works fine in the terminal.
+    """
+    if not settings.claude_enabled:
+        return ProbeResult("claude-engine", True, "disabled (CLAUDE_ENABLED=false)")
+    resolved = resolve_executable(settings.claude_bin)
+    if resolved is None:
+        return ProbeResult(
+            "claude-engine", False, f"{settings.claude_bin!r} not found — notes saved without LLM"
+        )
+    return ProbeResult("claude-engine", True, f"{resolved} ({settings.claude_model})")
+
+
 class HealthChecker:
     """Runs the health probes against the Telethon client, the reply bot, and settings."""
 
@@ -101,12 +121,13 @@ class HealthChecker:
         token = await self._token_probe()
         inbox = _inbox_writable(self._settings.inbox_dir)
         connection = self._connection_probe()
+        claude = _claude_engine(self._settings)
 
         if not auth.ok or not token.ok:
             overall = HealthStatus.ERROR
-        elif not inbox.ok:
+        elif not inbox.ok or not claude.ok:
             overall = HealthStatus.DEGRADED
         else:
             overall = HealthStatus.HEALTHY
 
-        return HealthReport(overall=overall, probes=[auth, token, inbox, connection])
+        return HealthReport(overall=overall, probes=[auth, token, inbox, connection, claude])

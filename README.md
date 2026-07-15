@@ -77,7 +77,11 @@ you enter your own credentials.)
 ```
 
 The window opens with a **gray 😴 (stopped)** status face. Click **Start**; the face turns
-**green 🤖 (running)** once health checks pass (telethon auth ✓, bot token ✓, inbox ✓, connected ✓).
+**green 🤖 (running)** once health checks pass (telethon auth ✓, bot token ✓, inbox ✓, connected ✓,
+claude-engine ✓).
+
+The **claude-engine** probe shows the resolved CLI path and model. If it reports *not found*,
+health is **degraded, not error**: notes are still captured, just without LLM title/tags/summary.
 
 Now open Telegram and send a text to **Saved Messages** ("note to self"). A `.md` note appears in
 your inbox and your **bot DM** replies `📝 저장됨: <filename>`. Close the window to stop reading.

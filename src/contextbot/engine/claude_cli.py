@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,42 @@ logger = logging.getLogger("contextbot.engine.claude")
 DEFAULT_EXECUTABLE = "claude"
 DEFAULT_MODEL = "sonnet"
 DEFAULT_TIMEOUT_SEC = 120.0
+
+# A GUI app launched from the Dock/Finder inherits launchd's minimal PATH
+# (/usr/local/bin:/bin:/usr/bin) — not the login shell's — so `claude` installed by Homebrew or
+# the native installer is invisible to shutil.which. These are the standard install locations,
+# checked only after PATH lookup fails. Set CLAUDE_BIN for anything unusual (e.g. nvm/npm).
+_FALLBACK_BIN_DIRS = (
+    "/opt/homebrew/bin",  # Homebrew (Apple Silicon)
+    "/usr/local/bin",  # Homebrew (Intel) / manual install
+    "~/.claude/local",  # Claude Code native installer
+    "~/.local/bin",
+)
+
+
+def resolve_executable(executable: str = DEFAULT_EXECUTABLE) -> str | None:
+    """Return an absolute path to the CLI, or None when it cannot be found.
+
+    Accepts a bare name (resolved via PATH, then the known install dirs) or an explicit path.
+    """
+    if os.sep in executable or executable.startswith("~"):
+        candidate = Path(executable).expanduser()
+        return str(candidate) if _is_executable(candidate) else None
+
+    found = shutil.which(executable)
+    if found:
+        return found
+
+    for directory in _FALLBACK_BIN_DIRS:
+        candidate = Path(directory).expanduser() / executable
+        if _is_executable(candidate):
+            logger.debug("resolved %r outside PATH: %s", executable, candidate)
+            return str(candidate)
+    return None
+
+
+def _is_executable(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
 
 
 class ClaudeError(Exception):
@@ -90,12 +127,17 @@ class ClaudeCLI:
         self.timeout_sec = timeout_sec
         self.cwd = cwd
 
+    def resolve(self) -> str | None:
+        """Absolute path to the CLI this engine will run, or None if it is not installed."""
+        return resolve_executable(self.executable)
+
     def is_available(self) -> bool:
-        """True when the executable can be found on PATH (or is an existing absolute path)."""
-        return shutil.which(self.executable) is not None
+        """True when the CLI can be located (PATH or a known install dir)."""
+        return self.resolve() is not None
 
     def _build_argv(
         self,
+        executable: str,
         *,
         system_prompt: str | None,
         add_dirs: Sequence[Path],
@@ -103,7 +145,7 @@ class ClaudeCLI:
         session_id: str | None,
     ) -> list[str]:
         # No prompt argv element: the prompt goes to stdin (see module docstring).
-        argv = [self.executable, "-p", "--output-format", "json", "--model", self.model]
+        argv = [executable, "-p", "--output-format", "json", "--model", self.model]
         if system_prompt is not None:
             argv += ["--system-prompt", system_prompt]
         if resume is not None:
@@ -132,10 +174,15 @@ class ClaudeCLI:
         session to a caller-chosen UUID. Raises :class:`ClaudeUnavailable`, :class:`ClaudeTimeout`,
         or :class:`ClaudeError`.
         """
-        if not self.is_available():
-            raise ClaudeUnavailable(f"{self.executable!r} not found on PATH")
+        executable = self.resolve()
+        if executable is None:
+            raise ClaudeUnavailable(
+                f"{self.executable!r} not found on PATH or in {', '.join(_FALLBACK_BIN_DIRS)} "
+                "(set CLAUDE_BIN to its full path)"
+            )
 
         argv = self._build_argv(
+            executable,
             system_prompt=system_prompt,
             add_dirs=add_dirs,
             resume=resume,

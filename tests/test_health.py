@@ -54,3 +54,43 @@ async def test_report_as_text(settings):
     text = (await HealthChecker(client, FakeBot(), settings).check()).as_text()
     for name in ("telethon-auth", "bot-token", "inbox", "connection"):
         assert name in text
+
+
+# ------------------------------------------------- claude-engine probe
+async def test_claude_probe_disabled_is_ok(settings):
+    """CLAUDE_ENABLED=false is a deliberate choice, not a fault."""
+    client = FakeClient(authorized=True)
+    await client.connect()
+    report = await HealthChecker(client, FakeBot(), settings).check()
+
+    probe = report.probe("claude-engine")
+    assert probe.ok and "disabled" in probe.detail
+    assert report.overall == HealthStatus.HEALTHY
+
+
+async def test_claude_probe_reports_resolved_path(settings, make_claude):
+    script = make_claude("pass")
+    client = FakeClient(authorized=True)
+    await client.connect()
+    enabled = replace(settings, claude_enabled=True, claude_bin=str(script), claude_model="haiku")
+
+    report = await HealthChecker(client, FakeBot(), enabled).check()
+
+    probe = report.probe("claude-engine")
+    assert probe.ok
+    assert str(script) in probe.detail and "haiku" in probe.detail
+    assert report.overall == HealthStatus.HEALTHY
+
+
+async def test_missing_claude_is_degraded_not_error(settings):
+    """A missing CLI must stay visible in the UI, but capture still works — so: DEGRADED."""
+    client = FakeClient(authorized=True)
+    await client.connect()
+    enabled = replace(settings, claude_enabled=True, claude_bin="claude-nope-xyz")
+
+    report = await HealthChecker(client, FakeBot(), enabled).check()
+
+    probe = report.probe("claude-engine")
+    assert not probe.ok
+    assert "not found" in probe.detail
+    assert report.overall == HealthStatus.DEGRADED

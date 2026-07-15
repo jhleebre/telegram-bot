@@ -9,12 +9,14 @@ import asyncio
 import pytest
 
 from contextbot.config import Settings
+from contextbot.engine import claude_cli
 from contextbot.engine.claude_cli import (
     ClaudeCLI,
     ClaudeError,
     ClaudeTimeout,
     ClaudeUnavailable,
     build_engine,
+    resolve_executable,
 )
 from .conftest import SUCCESS_RESULT, claude_prints
 
@@ -132,12 +134,72 @@ async def test_per_call_timeout_overrides_default(make_claude):
 async def test_missing_executable_raises_unavailable():
     cli = ClaudeCLI(executable="claude-does-not-exist-xyz")
     assert not cli.is_available()
-    with pytest.raises(ClaudeUnavailable):
+    with pytest.raises(ClaudeUnavailable, match="CLAUDE_BIN"):
         await cli.run("hi")
 
 
 async def test_available_for_real_script(make_claude):
     assert _cli(make_claude("pass")).is_available()
+
+
+# ------------------------------------------------- executable resolution
+# A Dock/Finder-launched GUI app inherits launchd's minimal PATH, so a Homebrew-installed
+# `claude` that works in the terminal is invisible to a bare shutil.which lookup.
+def test_resolve_prefers_path(make_claude, monkeypatch, tmp_path):
+    script = make_claude("pass", name="claude")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert resolve_executable("claude") == str(script)
+
+
+def test_resolve_falls_back_to_known_install_dir(make_claude, monkeypatch, tmp_path):
+    """With `claude` off PATH but in a standard install dir, it is still found."""
+    script = make_claude("pass", name="claude")
+    monkeypatch.setenv("PATH", "/nonexistent-bin")
+    monkeypatch.setattr(claude_cli, "_FALLBACK_BIN_DIRS", (str(tmp_path),))
+    assert resolve_executable("claude") == str(script)
+
+
+def test_resolve_returns_none_when_absent(monkeypatch):
+    monkeypatch.setenv("PATH", "/nonexistent-bin")
+    monkeypatch.setattr(claude_cli, "_FALLBACK_BIN_DIRS", ("/nonexistent-bin",))
+    assert resolve_executable("claude") is None
+
+
+def test_resolve_explicit_path(make_claude, monkeypatch):
+    script = make_claude("pass")
+    monkeypatch.setenv("PATH", "/nonexistent-bin")
+    assert resolve_executable(str(script)) == str(script)
+
+
+def test_resolve_explicit_path_that_is_missing(tmp_path):
+    assert resolve_executable(str(tmp_path / "nope" / "claude")) is None
+
+
+def test_resolve_rejects_non_executable_file(tmp_path, monkeypatch):
+    plain = tmp_path / "claude"
+    plain.write_text("not executable")
+    monkeypatch.setenv("PATH", "/nonexistent-bin")
+    monkeypatch.setattr(claude_cli, "_FALLBACK_BIN_DIRS", (str(tmp_path),))
+    assert resolve_executable("claude") is None
+
+
+def test_resolve_rejects_directory(tmp_path, monkeypatch):
+    """A *directory* named `claude` in an install dir must not be mistaken for the binary."""
+    (tmp_path / "claude").mkdir()
+    monkeypatch.setenv("PATH", "/nonexistent-bin")
+    monkeypatch.setattr(claude_cli, "_FALLBACK_BIN_DIRS", (str(tmp_path),))
+    assert resolve_executable("claude") is None
+
+
+async def test_run_uses_resolved_path_off_path(make_claude, claude_calls, monkeypatch, tmp_path):
+    """End-to-end: an engine configured with a bare name still runs a CLI that is off PATH."""
+    make_claude(claude_prints(SUCCESS_RESULT), name="claude")
+    monkeypatch.setenv("PATH", "/nonexistent-bin")
+    monkeypatch.setattr(claude_cli, "_FALLBACK_BIN_DIRS", (str(tmp_path),))
+
+    result = await ClaudeCLI(executable="claude").run("hi")
+    assert result.text == "pong"
+    assert len(claude_calls()) == 1
 
 
 def test_build_engine_from_settings(tmp_path):

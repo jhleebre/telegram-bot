@@ -121,10 +121,33 @@ New settings (all optional, see `.env.example`): `CLAUDE_ENABLED` (default true)
 (`claude`), `CLAUDE_MODEL` (`sonnet`), `CLAUDE_TIMEOUT_SEC` (`120`; text enrichment self-caps at
 60s so a slow run can't stall ingestion of a plain memo).
 
+#### Finding the CLI when launched from the Dock (found in owner verification)
+
+The first real-app run silently fell back with `'claude' not found on PATH`, even though `claude`
+worked fine in the terminal. A GUI app launched from the Dock/Finder inherits **launchd's minimal
+PATH** (`/usr/local/bin:/bin:/usr/bin`) rather than the login shell's, and the `.app` launcher
+`exec`s Python directly without a login shell — so Homebrew's `/opt/homebrew/bin` is invisible to
+`shutil.which`. Development and tests, run from a terminal, could never have caught this.
+
+`engine.claude_cli.resolve_executable` therefore falls back to the standard install locations
+(`/opt/homebrew/bin`, `/usr/local/bin`, `~/.claude/local`, `~/.local/bin`) after a PATH lookup
+fails; `CLAUDE_BIN` remains the escape hatch for anything unusual (e.g. an nvm/npm install).
+
+The lesson generalizes past this one binary: **increment 5's `mlx-whisper` and `ffmpeg` will hit
+exactly the same wall** — resolve them the same way rather than assuming PATH.
+
+#### Making degradation visible
+
+The fallback is deliberately silent in the note (that is the point — never lose a capture), which
+also made a *broken engine* indistinguishable from a working one without reading the log. The
+health panel now carries a **`claude-engine`** probe showing the resolved path + model, and a
+missing CLI reports **DEGRADED** (not ERROR — capture still works).
+
 Tests: `test_claude_cli.py` drives the **real subprocess path** against a fake `claude` script on
-disk (argv, stdin delivery, resume, exit codes, timeout+kill, missing binary) — no model runs.
-`test_parsing.py`, `test_prompts.py`, and the enrichment/fallback cases in `test_text_handler.py`
-cover the rest. Suite: 88 → 145.
+disk (argv, stdin delivery, resume, exit codes, timeout+kill, missing binary, off-PATH resolution)
+— no model runs. `test_parsing.py`, `test_prompts.py`, the enrichment/fallback cases in
+`test_text_handler.py`, and the `claude-engine` probe cases in `test_health.py` cover the rest.
+Suite: 88 → 156.
 
 ## Human-in-the-loop via session preservation
 
