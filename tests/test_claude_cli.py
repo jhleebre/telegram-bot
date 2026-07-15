@@ -15,6 +15,7 @@ from contextbot.engine.claude_cli import (
     ClaudeError,
     ClaudeTimeout,
     ClaudeUnavailable,
+    ClaudeUsageLimit,
     build_engine,
     resolve_executable,
 )
@@ -90,6 +91,67 @@ async def test_session_id_pins_new_session(make_claude, claude_calls):
 async def test_nonzero_exit_raises_with_stderr(make_claude):
     script = make_claude("sys.stderr.write('boom: bad flag')\ncode = 2")
     with pytest.raises(ClaudeError, match="exited 2"):
+        await _cli(script).run("hi")
+
+
+# ------------------------------------------------- API errors
+# Shapes below are copied from real CLI v2.1.187 runs against an injected 429 endpoint.
+# Note `subtype` stays "success" even when is_error is true, and stderr is empty — the useful
+# detail is only in the stdout JSON, which the CLI still prints while exiting non-zero.
+RATE_LIMITED = {
+    "type": "result",
+    "subtype": "success",
+    "is_error": True,
+    "api_error_status": 429,
+    "result": (
+        "API Error: Server is temporarily limiting requests (not your usage limit) · "
+        "Number of request tokens has exceeded your per-5-minute rate limit"
+    ),
+    "duration_ms": 57,
+    "num_turns": 1,
+    "total_cost_usd": 0,
+}
+
+
+async def test_usage_limit_is_typed_and_keeps_the_message(make_claude):
+    """A 429 must be diagnosable from the log: exit code 1 + empty stderr alone is not."""
+    script = make_claude(claude_prints(RATE_LIMITED) + "\ncode = 1")
+
+    with pytest.raises(ClaudeUsageLimit) as exc:
+        await _cli(script).run("hi")
+
+    assert "per-5-minute rate limit" in str(exc.value)
+    assert isinstance(exc.value, ClaudeError)  # callers catching ClaudeError still degrade
+
+
+async def test_subscription_usage_limit_also_typed(make_claude):
+    payload = {**RATE_LIMITED, "result": "API Error: Claude AI usage limit reached"}
+    script = make_claude(claude_prints(payload) + "\ncode = 1")
+
+    with pytest.raises(ClaudeUsageLimit, match="usage limit reached"):
+        await _cli(script).run("hi")
+
+
+async def test_other_api_error_reports_status(make_claude):
+    payload = {**RATE_LIMITED, "api_error_status": 500, "result": "API Error: Internal"}
+    script = make_claude(claude_prints(payload) + "\ncode = 1")
+
+    with pytest.raises(ClaudeError, match="API error 500") as exc:
+        await _cli(script).run("hi")
+    assert not isinstance(exc.value, ClaudeUsageLimit)
+
+
+async def test_error_json_on_zero_exit_still_raises(make_claude):
+    """is_error must be honoured even if the CLI ever exits 0 alongside it."""
+    script = make_claude(claude_prints(RATE_LIMITED))
+    with pytest.raises(ClaudeUsageLimit):
+        await _cli(script).run("hi")
+
+
+async def test_nonzero_exit_with_empty_stderr_and_no_json(make_claude):
+    """The exit-code path still reports something when there is no JSON to explain it."""
+    script = make_claude("code = 1")
+    with pytest.raises(ClaudeError, match="exited 1"):
         await _cli(script).run("hi")
 
 

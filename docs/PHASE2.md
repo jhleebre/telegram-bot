@@ -136,18 +136,70 @@ fails; `CLAUDE_BIN` remains the escape hatch for anything unusual (e.g. an nvm/n
 The lesson generalizes past this one binary: **increment 5's `mlx-whisper` and `ffmpeg` will hit
 exactly the same wall** — resolve them the same way rather than assuming PATH.
 
+#### Usage limits / API errors (verified by injecting a 429)
+
+Behaviour measured against CLI v2.1.187 by pointing `ANTHROPIC_BASE_URL` at a local endpoint
+returning HTTP 429:
+
+```json
+{ "subtype": "success",         // ← stays "success" even on failure
+  "is_error": true,             // ← the reliable signal
+  "api_error_status": 429,      // ← the structured status
+  "result": "API Error: Server is temporarily limiting requests (not your usage limit) · …" }
+// exit code 1, empty stderr, fails in ~2s
+```
+
+Three consequences, all now handled:
+
+- **`subtype` is not a failure signal** — `is_error` and the exit code are. The subtype check
+  survives only as defense for result kinds that may not set `is_error` (e.g. max turns).
+- **The detail lives in stdout, not stderr** — the CLI prints its JSON *and* exits non-zero, with
+  stderr empty. Reporting only the exit code produced a useless `claude exited 1: <no stderr>`,
+  indistinguishable from a network outage or a bad flag. `run()` therefore parses stdout first and
+  only falls back to the exit code when there is no JSON.
+- **429 is typed as `ClaudeUsageLimit`** (a `ClaudeError`, so existing callers still degrade).
+  It covers both a temporary server-side rate limit and an exhausted subscription limit — the CLI
+  reports both as 429 and distinguishes them only in the message, which is preserved.
+
+For text notes this is fully safe: the note is saved via the Phase 1 path after a ~2s failure, and
+the bot DM says why. **Increments 2–5 need more thought** — see "Degradation per pipeline" below.
+
+#### Degradation per pipeline (decide when each increment is built)
+
+Text enrichment degrades cleanly because a no-LLM path exists. **The later pipelines have no such
+luxury and must not silently produce a bad note:**
+
+| Pipeline | If the engine is unavailable / limited |
+|----------|----------------------------------------|
+| Text (1) | ✅ Phase 1 path; note keeps full fidelity, only metadata is weaker |
+| Document (2) | Deterministic converter output can still be saved un-refined — degrade like text |
+| Image (3) | No fallback: a described note *is* the LLM output. Save the image + a stub note? |
+| Audio (5) | **No fallback.** STT is local, so the transcript survives — but the meeting note does not. Saving the raw transcript beats losing the recording. |
+| Review (4) | A limit mid-review would strand a session in `AWAITING_REVIEW`. The state machine must handle "cannot resume right now" without dropping the draft. |
+
+A **circuit breaker** (skip the engine for N minutes after a `ClaudeUsageLimit` instead of retrying
+per message) is deliberately *not* built yet: at ~2s per failure and a few notes a day it buys
+nothing. It becomes worthwhile once audio jobs — which are expensive and may retry — exist.
+
 #### Making degradation visible
 
 The fallback is deliberately silent in the note (that is the point — never lose a capture), which
-also made a *broken engine* indistinguishable from a working one without reading the log. The
-health panel now carries a **`claude-engine`** probe showing the resolved path + model, and a
-missing CLI reports **DEGRADED** (not ERROR — capture still works).
+also made a *broken engine* indistinguishable from a working one without reading the log. Two
+surfaces now report it:
+
+- The health panel carries a **`claude-engine`** probe showing the resolved path + model; a missing
+  CLI reports **DEGRADED** (not ERROR — capture still works). It proves the binary is *findable*,
+  not that it can *run* — a usage limit is invisible to it.
+- The **bot DM reply** appends `⚠️ …(제목/태그는 기본값)` when enrichment was attempted and failed,
+  naming a usage limit specifically. This is the only surface the owner sees on a phone. It stays
+  quiet when enrichment succeeds, and when `CLAUDE_ENABLED=false` (a deliberate choice, not a
+  fault — no need to nag on every note).
 
 Tests: `test_claude_cli.py` drives the **real subprocess path** against a fake `claude` script on
 disk (argv, stdin delivery, resume, exit codes, timeout+kill, missing binary, off-PATH resolution)
 — no model runs. `test_parsing.py`, `test_prompts.py`, the enrichment/fallback cases in
 `test_text_handler.py`, and the `claude-engine` probe cases in `test_health.py` cover the rest.
-Suite: 88 → 156.
+Suite: 88 → 165.
 
 ## Human-in-the-loop via session preservation
 

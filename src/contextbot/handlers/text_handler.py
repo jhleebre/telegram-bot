@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from ..config import Settings
 from ..engine import prompts
-from ..engine.claude_cli import ClaudeCLI, ClaudeError, build_engine
+from ..engine.claude_cli import ClaudeCLI, ClaudeError, ClaudeUsageLimit, build_engine
 from ..engine.parsing import ParseError, extract_json_object
 from ..notes.markdown_writer import write_note
 from .base import HandlerResult, IncomingMessage
@@ -120,15 +120,22 @@ async def handle_text(
         return HandlerResult(reply="빈 메시지는 저장하지 않았습니다.")
 
     enrichment: Enrichment | None = None
+    degraded: str | None = None
     if settings.claude_enabled:
         engine = engine or build_engine(settings)
         try:
             enrichment = await enrich(text, engine)
+        except ClaudeUsageLimit as exc:
+            # Can persist for hours, so say so plainly rather than looking like a random glitch.
+            logger.warning("text enrichment hit a usage limit, using fallback: %s", exc)
+            degraded = "사용량 제한으로 LLM 보강을 건너뛰었습니다"
         except (ClaudeError, ParseError) as exc:
             # Expected failure modes (no CLI, timeout, non-JSON reply): degrade, don't fail.
             logger.warning("text enrichment unavailable, using fallback: %s", exc)
+            degraded = "LLM 보강에 실패했습니다"
         except Exception:  # pragma: no cover - defensive: never lose a note to enrichment
             logger.exception("text enrichment raised unexpectedly, using fallback")
+            degraded = "LLM 보강에 실패했습니다"
 
     title = enrichment.title if enrichment else _derive_title(text)
     tags = enrichment.tags if enrichment else []
@@ -148,4 +155,9 @@ async def handle_text(
         extra=extra,
         slug_source=title,
     )
-    return HandlerResult(reply=f"📝 저장됨: {path.name}", saved_path=path)
+    # The bot DM is the only surface the owner sees, so a silent quality drop must still be
+    # visible there — the note itself is saved either way.
+    reply = f"📝 저장됨: {path.name}"
+    if degraded:
+        reply += f"\n⚠️ {degraded} (제목/태그는 기본값)"
+    return HandlerResult(reply=reply, saved_path=path)

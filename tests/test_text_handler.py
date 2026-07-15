@@ -5,7 +5,12 @@ from datetime import datetime, timezone
 import pytest
 import yaml
 
-from contextbot.engine.claude_cli import ClaudeResult, ClaudeTimeout, ClaudeUnavailable
+from contextbot.engine.claude_cli import (
+    ClaudeResult,
+    ClaudeTimeout,
+    ClaudeUnavailable,
+    ClaudeUsageLimit,
+)
 from contextbot.handlers.base import IncomingMessage, MessageKind
 from contextbot.handlers.text_handler import handle_text
 
@@ -163,3 +168,31 @@ async def test_falls_back_to_first_line_on_any_failure(llm_settings, engine):
     assert fm["tags"] == []
     assert "summary" not in fm
     assert "본문" in result.saved_path.read_text(encoding="utf-8")
+
+
+async def test_usage_limit_is_reported_in_the_reply(llm_settings):
+    """A usage limit can last hours; the bot DM is the only place the owner would notice."""
+    engine = FakeEngine(raises=ClaudeUsageLimit("API Error: Claude AI usage limit reached"))
+    result = await handle_text(_msg("메모"), llm_settings, engine=engine)
+
+    assert result.saved_path.exists()  # the note is never lost
+    assert "저장됨" in result.reply
+    assert "사용량 제한" in result.reply
+
+
+async def test_other_engine_failure_is_reported_in_the_reply(llm_settings):
+    engine = FakeEngine(raises=ClaudeUnavailable("not found"))
+    result = await handle_text(_msg("메모"), llm_settings, engine=engine)
+    assert "보강에 실패" in result.reply
+
+
+async def test_successful_enrichment_reply_has_no_warning(llm_settings):
+    engine = _replying({"title": "t", "tags": ["a"]})
+    result = await handle_text(_msg("메모"), llm_settings, engine=engine)
+    assert "⚠️" not in result.reply
+
+
+async def test_disabled_engine_reply_has_no_warning(settings):
+    """CLAUDE_ENABLED=false is a deliberate choice — don't nag about it on every note."""
+    result = await handle_text(_msg("메모"), settings)
+    assert "⚠️" not in result.reply

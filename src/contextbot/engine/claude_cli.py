@@ -81,6 +81,30 @@ class ClaudeTimeout(ClaudeError):
     """The job exceeded its timeout budget and was killed."""
 
 
+class ClaudeUsageLimit(ClaudeError):
+    """The API refused the request for quota reasons (HTTP 429).
+
+    Covers both a temporary server-side rate limit and an exhausted subscription usage limit —
+    the CLI reports both as 429 and distinguishes them only in the message, which is preserved in
+    ``str(exc)``. Either way the caller should degrade rather than retry immediately: a
+    subscription limit can persist for hours.
+    """
+
+
+def _error_from(data: dict[str, Any], returncode: int) -> ClaudeError:
+    """Build the most specific error the CLI's JSON result supports."""
+    message = str(data.get("result") or "").strip() or f"claude exited {returncode}"
+    subtype = data.get("subtype")
+    if subtype and subtype != "success":
+        message = f"{subtype}: {message}"
+    status = data.get("api_error_status")
+    if status == 429:
+        return ClaudeUsageLimit(message)
+    if status is not None:
+        return ClaudeError(f"API error {status}: {message}")
+    return ClaudeError(message)
+
+
 @dataclass(frozen=True)
 class ClaudeResult:
     """A parsed ``--output-format json`` result."""
@@ -210,16 +234,27 @@ class ClaudeCLI:
             await self._terminate(proc)
             raise ClaudeTimeout(f"claude exceeded {budget:.0f}s") from None
 
-        if proc.returncode != 0:
+        # An API failure (rate limit, outage) exits non-zero with an *empty stderr* and puts the
+        # useful detail in the stdout JSON, so parse it before falling back to the exit code.
+        data: dict[str, Any] | None = None
+        try:
+            data = _decode(stdout)
+        except ClaudeError:
+            if proc.returncode == 0:
+                raise
+        if data is None:
             detail = stderr.decode("utf-8", errors="replace").strip()[:300]
             raise ClaudeError(f"claude exited {proc.returncode}: {detail or '<no stderr>'}")
 
-        data = _decode(stdout)
-        if data.get("is_error") or data.get("subtype") not in (None, "success"):
-            raise ClaudeError(
-                f"claude reported an error ({data.get('subtype')}): "
-                f"{str(data.get('result'))[:200]}"
-            )
+        # `subtype` stays "success" even when is_error is true (verified against CLI v2.1.187),
+        # so is_error and the exit code — not subtype — are the reliable signals. The subtype
+        # check is kept as defense for result kinds that may not set is_error (e.g. max turns).
+        if (
+            data.get("is_error")
+            or proc.returncode != 0
+            or data.get("subtype") not in (None, "success")
+        ):
+            raise _error_from(data, proc.returncode)
 
         result = ClaudeResult(
             text=(data.get("result") or "").strip(),
