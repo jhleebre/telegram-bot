@@ -1,0 +1,7 @@
+# Runtime dependencies
+telethon>=1.36            # user-account client: reads Saved Messages (durable input)
+python-telegram-bot>=21,<22  # bot client: send-only replies to the owner's bot DM
+PySide6>=6.6
+python-dotenv>=1.0
+PyYAML>=6.0
+# cryptg  # optional: speeds up Telethon's crypto (native extension)

@@ -1,0 +1,128 @@
+# Personal Telegram Context Bot
+
+A single-user tool that turns messages and files you send into Markdown notes in your personal
+knowledge base (`~/Documents/MarkNotes/0_inbox/`).
+
+It uses **two Telegram channels for two jobs**:
+
+- **Input — your "Saved Messages":** read via your own account (Telethon). Saved Messages is
+  retained indefinitely and its history is readable, so **messages sent while the app was closed —
+  even over a weekend — are processed the next time you open the app.** Only you can write to your
+  own Saved Messages, so single-user security is inherent.
+- **Reply — your bot's DM:** a bot sends confirmations (and, in Phase 2, review questions) to your
+  bot chat. Replying *into* Saved Messages would loop, so replies use the separate bot channel.
+
+The bot **does not run in the background** — it only reads while the desktop app window is open.
+A small PySide6 window shows live status (stopped / starting / running / processing / error) and a
+health panel.
+
+## Why this design
+
+The Telegram **Bot API** only keeps undelivered updates for ~24h and **can't read chat history**,
+so a bot alone would lose messages sent while the laptop sleeps over a weekend. A **user-account**
+client can read Saved Messages history, which removes the 24h limit entirely.
+
+## Status
+
+- **Phase 1 (implemented):** desktop app, Saved Messages ingestion with catch-up + live, bot-DM
+  confirmations, health checks, and **text → Markdown note**. Audio/image/document are stubbed with
+  a "coming in Phase 2" reply.
+- **Phase 2 (planned):** audio → meeting notes (local Whisper + `claude -p`, glossary correction
+  with human-in-the-loop review **in the bot DM**), images → described notes, and
+  pdf/pptx/docx/… → Markdown. See [docs/PHASE2.md](docs/PHASE2.md).
+
+## Setup
+
+```bash
+cd ~/Projects/telegram-bot
+
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt   # runtime + test deps
+
+cp .env.example .env      # then fill in the values below
+```
+
+### What you must provide (in `.env`)
+
+1. **`TELEGRAM_API_ID` / `TELEGRAM_API_HASH`** — create an app at
+   <https://my.telegram.org> → *API development tools*. This is for reading your Saved Messages.
+2. **`TELEGRAM_BOT_TOKEN`** — create a bot with **@BotFather**, then **press Start on the bot once**
+   (so it can DM you). This is for replies.
+
+### One-time login (you run this yourself)
+
+```bash
+.venv/bin/python login.py
+```
+
+This logs into **your** Telegram account interactively — it prompts for your phone number, the
+login code Telegram sends you, and your 2FA password if you have one. It creates
+`state/contextbot.session` and records a baseline so your *existing* Saved Messages history is not
+imported. Only messages you send **after** this point become notes. (Nothing here is automated —
+you enter your own credentials.)
+
+## Run
+
+```bash
+.venv/bin/python run.py
+```
+
+The window opens with a **gray 😴 (stopped)** status face. Click **Start**; the face turns
+**green 🤖 (running)** once health checks pass (telethon auth ✓, bot token ✓, inbox ✓, connected ✓).
+
+Now open Telegram and send a text to **Saved Messages** ("note to self"). A `.md` note appears in
+your inbox and your **bot DM** replies `📝 저장됨: <filename>`. Close the window to stop reading.
+
+**Offline messages survive.** Anything you send to Saved Messages while the app is closed — even
+after several days — is processed in order the next time you Start the app.
+
+### Add to the Dock (launch without Terminal)
+
+Build a `Context Bot.app` bundle once:
+
+```bash
+./scripts/build_app.sh
+```
+
+This creates `Context Bot.app` (robot icon) in the project folder. Double-click it in Finder to
+launch, then right-click its Dock icon → **Options → Keep in Dock** (or drag the `.app` onto the
+Dock). From then on, one click on the Dock icon opens the app — no `run.py`, no Terminal.
+
+The bundle just launches the project's `.venv` Python + `run.py`, so keep the project folder in
+place. Re-run `./scripts/build_app.sh` if you move the project. To build into a different location
+(e.g. your Applications folder): `./scripts/build_app.sh ~/Applications`.
+
+## Test
+
+```bash
+.venv/bin/pytest
+```
+
+No real Telegram connection, session, or token is needed; the suite uses fake Telethon/bot objects
+and temporary inbox directories. In a headless environment, set `QT_QPA_PLATFORM=offscreen`.
+
+## Project layout
+
+```
+src/contextbot/
+├── config.py             # settings from env/.env (api id/hash, bot token, inbox)
+├── logging_setup.py      # file + in-memory (UI) logging
+├── core/
+│   ├── client_service.py # Telethon input (catch-up + live) + dispatch + bot reply
+│   ├── notifier.py       # send-only bot → owner DM
+│   ├── hwm.py            # high-water-mark (last processed Saved Messages id)
+│   ├── router.py         # classify + route → handlers
+│   ├── health.py         # auth / bot-token / inbox / connection probes
+│   ├── security.py       # Saved-Messages self-peer guard
+│   └── status.py         # observable status model
+├── handlers/             # text handler (Phase 1) + Phase 2 stubs
+├── notes/                # frontmatter, filename, atomic markdown writer
+└── ui/                   # PySide6 window + asyncio worker thread
+login.py                  # one-time interactive login (user-run)
+run.py                    # app entrypoint
+scripts/                  # build_app.sh (Dock .app bundle) + make_icon.py
+tests/                    # pytest suite
+docs/                     # PHASE1.md, PHASE2.md
+```
+
+See [docs/PHASE1.md](docs/PHASE1.md) for the detailed design.

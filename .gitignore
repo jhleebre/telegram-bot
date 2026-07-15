@@ -1,0 +1,23 @@
+# Virtual environment
+.venv/
+
+# Secrets / local config
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Runtime
+logs/
+state/
+.tmp/
+
+# Built app bundle + icon artifacts
+build/
+*.app/
+
+# macOS
+.DS_Store
