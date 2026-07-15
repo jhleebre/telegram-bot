@@ -99,10 +99,39 @@ Constraints inherited from increment 1 (do not re-litigate):
 - **Degrade on non-limit failure** as text does — but note there is no no-LLM fallback here, so
   "degrade" likely means *don't write a note and say why*, not *write a worse one*.
 
-Still to decide: what a non-PDF office file should reply (`document_handler` must say "PDF로
-내보내서 보내주세요" rather than a generic stub, so a `.docx` never silently does nothing), and
-whether `.txt`/`.csv` — already routed to `DOCUMENT` by `classify_document` — should skip the LLM
-entirely and take a text-like path.
+#### The remaining two, decided
+
+**Unsupported office formats (`docx`/`pptx`/`xlsx`/…) → reply and treat as processed.**
+`document_handler` returns a normal `HandlerResult(reply="… PDF로 내보내서 보내주세요", saved_path=None)`,
+so `_process` advances the HWM exactly as it does for `handle_text`'s empty-message reply. **No new
+plumbing.** The two alternatives are both wrong here:
+
+- Not `DeferMessage` — that is for conditions time will fix. A `.docx` never becomes supported, so
+  the bot would halt on every Start forever.
+- Not an exception — the skip path fires a `⚠️ 메시지 처리 실패` DM, which reads like a fault. This
+  isn't one; the bot did exactly what it should and is telling the owner what to do.
+
+Marking it processed is what stops the same `.docx` re-nagging on every subsequent Start.
+
+**`.txt` / `.csv` → converted to Markdown, not passed through.** MarkNotes only surfaces `.md`, so a
+passthrough file is invisible in the vault — saving it would look like success and produce nothing
+the owner can find. These are **text-like, not PDF-like**: route them to a text path, not the PDF
+one. There is no page to render, so no PDF, no `Read`, no tools.
+
+- `.txt` → the content *is* the body. Reuse `handle_text`'s enrichment for title/tags/summary.
+- `.csv` → render the Markdown table **deterministically** (stdlib `csv`), then take the same note
+  path. **Do not let the LLM transcribe the table.** It would retype the owner's numbers, and a
+  silently altered figure in a data file is precisely the error nothing downstream can catch. The
+  LLM's job stays metadata-only — the same boundary the text path already holds (body is always the
+  original; the model only supplies frontmatter).
+
+Two landmines for whoever builds this:
+
+- **Encoding.** Excel on Windows writes Korean CSV as CP949/EUC-KR, not UTF-8. A naive
+  `read_text()` either raises or mojibakes. Detect/fallback rather than assuming UTF-8 — and treat a
+  decode failure as a *permanent* failure (reply and move on), never a `DeferMessage`.
+- **Size.** A large `.csv` should not become a giant note. Cap it, and say so in the reply rather
+  than writing something unusable.
 
 ## Scope
 
@@ -112,6 +141,7 @@ entirely and take a text-like path.
 | Image (screen capture) | Description + OCR note, original embedded → `0_inbox` | kept (embedded/`.assets`) |
 | **PDF** | Markdown (Claude reads the PDF natively) → `0_inbox` | **moved to `~/Downloads/`** |
 | docx / pptx / xlsx / … | **out of scope** — the owner exports to PDF from MS Office and sends that | — |
+| txt / csv | Markdown note (csv → table, rendered deterministically) → `0_inbox` | **moved to `~/Downloads/`** |
 | Markdown (`.md`) | Saved as-is → `0_inbox` | is the note |
 | Text (upgrade) | ✅ **shipped** — LLM-enriched title/tags/summary (fallback = Phase 1 path) | — |
 
