@@ -50,14 +50,18 @@ Scope: `handlers/document_handler.py` (currently a stub), `converters/doc_to_mar
 `files/originals.py`. No review loop. Includes the `.md` passthrough (item D), which needs no
 converter and no LLM — **build that first**, it is a few lines and proves the routing end-to-end.
 
-**Open decision 3 is settled in direction: drive the conversion with Claude Code, not a Python
-library** (owner's call — library output is typically mediocre on layout, tables, and structure).
-Probed against the real CLI before committing to it; the results change how it must be built:
+**Open decision 3 is resolved: Claude Code drives the conversion, not a Python library** (owner's
+call — library output is mediocre on layout, tables, and structure) — **and it reads a PDF, not the
+original office file.** The final shape is in *The shape: normalize to PDF* below; read this section
+first only for the two findings that constrain it, both probed against the real CLI on a `.docx`:
 
 | Flags | Turns | Result |
 |-------|-------|--------|
 | Increment 1's hermetic flags (default permission mode) | 26 | ❌ **Fabricated** — see below |
 | `--permission-mode bypassPermissions` + isolated dir | 8 | ✅ accurate (67s, ~$0.10 est) |
+
+*(Neither is the plan — normalizing to PDF beats both. But the fabrication finding applies to **any**
+route, and the denial finding is why "just point Claude at the .docx" is not an option.)*
 
 - **Default permission mode denies Bash**, and `Read` cannot parse a `.docx` (a ZIP). All 13 Bash
   attempts (`unzip`, `python3`, `node`, `perl`, `strings`, `textutil`, …) were denied, so it had no
@@ -73,20 +77,49 @@ Probed against the real CLI before committing to it; the results change how it m
   burns the plan's usage allowance roughly twice as fast, and is slow enough that the per-job
   timeout needs raising above the 60s the text path uses.
 
-**The one thing to decide before writing code — how far to open the tools.** `bypassPermissions`
-gives Claude a shell, and **document content is a prompt-injection vector**: only the owner can
-write to Saved Messages, but that does not make the *document* theirs — a forwarded PDF can carry
-"ignore previous instructions and …" straight into a model that holds a shell. Options:
+#### The shape: normalize to PDF, then one PDF → Markdown path (owner's call, probed)
 
-- **Narrow `--allowedTools`** instead of a full bypass (e.g. only what unzip/extract needs).
-- **Hybrid** — a library does the raw *extraction* (no LLM), Claude does the *structuring* from that
-  text (no tools). This removes the shell entirely, so the injection risk goes with it, and still
-  answers the "libraries are mediocre" objection: the library only does extraction, which libraries
-  are fine at; Claude does the layout/structure, which is what they are bad at.
-- Sandbox the run (container / restricted user).
+`bypassPermissions` gives Claude a shell, and **document content is a prompt-injection vector**:
+only the owner can write to Saved Messages, but that does not make the *document* theirs — a
+forwarded PDF can carry "ignore previous instructions and …" straight into a model holding a shell.
 
-Also worth probing first: **PDF may need no tools at all** — Claude Code's `Read` parses PDFs
-natively. If so, PDF is a much cheaper path than docx/pptx and might not need a permission mode.
+**Converting `docx`/`pptx` → PDF first removes the shell entirely**, because Claude Code's `Read`
+parses PDFs natively. Probed against the real CLI, same document, isolated dir:
+
+| Input | Turns | Est. | Tool denials | Permission mode |
+|-------|-------|------|--------------|-----------------|
+| `.docx` with a shell | 8 | ~$0.10 | 13 | **`bypassPermissions` required** |
+| **`.pdf` direct** | **3** | **~$0.041** | **0** | **none needed** |
+
+The PDF path is better on every axis — no shell, no permission mode, ~⅓ the turns, ~½ the plan-usage
+burn, and the output was *better* structured (it inferred `##` headings). It also keeps increment 1's
+hermetic flags intact. **Adopt it: normalize every office format to PDF, then keep exactly one
+LLM-facing path (PDF → Markdown).** Conversion is deterministic — no LLM, so nothing to fabricate.
+
+**The cost: LibreOffice becomes a real dependency.** Nothing on this machine converts these today
+(`soffice`, `libreoffice`, `pandoc`, `unoconv` all absent; `cupsfilter` produced 0 bytes on both
+`.docx` and HTML):
+
+| Input | Zero-install path | Verdict |
+|-------|-------------------|---------|
+| `pdf` | passthrough | ✅ best case |
+| `docx` | `textutil` → html → Chrome headless → pdf (both present, works) | ⚠️ **pointless** — fidelity is capped at the `textutil` step, so the layout benefit that motivated PDF is already gone. Library quality with extra steps. |
+| `pptx` / `xlsx` | none — `textutil` supports only `txt, rtf, rtfd, html, doc, docx, wordml, odt, webarchive` | ❌ no path at all |
+
+So real layout fidelity needs a real renderer: **`brew install --cask libreoffice`** (~700MB), then
+`soffice --headless --convert-to pdf`. That is the price of this design. It looks like a good trade:
+one install, once, versus handing a shell to a model on every document — and it unlocks pptx/xlsx,
+which have no path otherwise.
+
+**Note for whoever builds this:** `soffice` lives at
+`/Applications/LibreOffice.app/Contents/MacOS/soffice` — **not on PATH even in a terminal**, let
+alone under the Dock's minimal PATH. Resolve it with the `engine.claude_cli.resolve_executable`
+pattern; a bare `which soffice` will fail on a machine where LibreOffice is installed and working.
+
+Still to decide in increment 2: what to do when LibreOffice is absent (degrade to the
+textutil/Chrome path for docx? reply "지원하지 않음"? make it a health probe like `claude-engine`?),
+and whether long PDFs need paging (`Read` takes ≤20 pages per request and requires an explicit
+range above 10 pages — a 60-page deck is several turns).
 
 Constraints inherited from increment 1 (do not re-litigate):
 
@@ -131,9 +164,10 @@ src/contextbot/
     └── originals.py        # original-file policy (Downloads / delete / embed)
 ```
 
-Additional runtime deps: `mlx-whisper` (STT, Apple Silicon); a base document converter
-(candidate `markitdown`, or `pandoc` + `python-docx`/`python-pptx`/`pdfplumber`). `ffmpeg` is
-already present. `claude` CLI is already installed (v2.1.187 verified).
+Additional runtime deps: `mlx-whisper` (STT, Apple Silicon); **LibreOffice** for office → PDF
+(`brew install --cask libreoffice`; not installed yet — verified absent, along with `pandoc` /
+`unoconv`, and `cupsfilter` fails). `ffmpeg` is already present. `claude` CLI is already installed
+(v2.1.187 verified).
 
 ## Engine: `claude -p` wrapper (`engine/claude_cli.py`)
 
@@ -386,11 +420,12 @@ Still open (each is confirmed when its increment starts):
 
 2. Whether meeting notes should also trigger the glossary **git commit/push** the `/meeting` skill
    does (both the vault and meeting-transcriber are git repos). *(increment 5)*
-3. ~~Base document converter~~ — **direction decided: Claude-Code-driven, not a Python library**
-   (owner's call). What remains for increment 2 is *how far to open the tools* — full
-   `bypassPermissions` vs a narrow `--allowedTools` vs the hybrid (library extracts, Claude
-   structures, no shell). See *Next up: increment 2* for the probe results that constrain this.
-   *(increment 2)*
+3. ~~Base document converter~~ — **resolved: normalize to PDF, then Claude reads the PDF.**
+   Not a Python library (owner's call — library output is mediocre on layout), and not a shell-armed
+   agent either: `docx`/`pptx` → PDF deterministically, then Claude Code's native PDF `Read`. Probed:
+   3 turns / ~$0.041 / zero tool denials / no permission mode, vs 8 turns / ~$0.10 /
+   `bypassPermissions` for the shell route. Adds a **LibreOffice** dependency (~700MB) — that is the
+   trade. See *Next up: increment 2*.
 5. Whether to physically **share** the meeting-transcriber glossary file or copy/symlink it.
    *(increment 5)*
 
