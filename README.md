@@ -30,10 +30,14 @@ client can read Saved Messages history, which removes the 24h limit entirely.
   - ✅ **1. `claude -p` engine** — shared headless-CLI wrapper, plus its first use: text notes now
     get an **LLM-derived title, tags, and summary**. Falls back to the Phase 1 path (first line as
     title) when the CLI is missing, slow, or disabled, so the bot still works offline.
-  - ⬜ 2. documents (pdf/pptx/docx/…) → Markdown · ⬜ 3. images → described notes ·
+  - ⬜ 2. **PDF** → Markdown · ⬜ 3. images → described notes ·
     ⬜ 4. human-in-the-loop review plumbing · ⬜ 5. audio → meeting notes
 
   Audio/image/document still reply "Phase 2 예정". See [docs/PHASE2.md](docs/PHASE2.md).
+
+  **Documents are PDF-only by design.** Export from Word/PowerPoint to PDF and send that — Claude
+  Code reads PDFs natively, so the bot needs no converter, no extra dependency, and never has to
+  grant the model shell access to open a file.
 
 ### What happens when the Claude usage limit runs out
 
