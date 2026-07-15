@@ -6,6 +6,11 @@ are all duck-typed fakes.
 
 from __future__ import annotations
 
+import json
+import os
+import stat
+import sys
+import textwrap
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +40,83 @@ def settings(inbox: Path, tmp_path: Path) -> Settings:
         inbox_dir=inbox,
         owner_chat_id=None,
         log_level="INFO",
+        # Off by default so handler tests exercise the no-LLM path unless they opt in.
+        claude_enabled=False,
     )
+
+
+# ------------------------------------------------------- `claude -p` engine fakes
+SUCCESS_RESULT = {
+    "type": "result",
+    "subtype": "success",
+    "is_error": False,
+    "result": "pong",
+    "session_id": "11111111-2222-3333-4444-555555555555",
+    "total_cost_usd": 0.0123,
+    "duration_ms": 4700,
+    "num_turns": 1,
+}
+
+
+@pytest.fixture
+def make_claude(tmp_path: Path):
+    """Factory for a fake `claude` executable.
+
+    Returns a real script on disk, so tests drive ClaudeCLI's actual subprocess/stdin/argv path
+    without ever invoking a model. The script records its argv and stdin to ``<script>.calls.json``.
+
+    ``body`` is Python source appended to the script; it may print output and set ``code``
+    (the exit status).
+    """
+
+    def _make(body: str, *, name: str = "claude") -> Path:
+        script = tmp_path / name
+        record = tmp_path / f"{name}.calls.json"
+        script.write_text(
+            textwrap.dedent(
+                f"""\
+                #!{sys.executable}
+                import json, sys, time
+                stdin = sys.stdin.read()
+                calls = []
+                record = {str(record)!r}
+                try:
+                    with open(record) as fh:
+                        calls = json.load(fh)
+                except FileNotFoundError:
+                    pass
+                calls.append({{"argv": sys.argv[1:], "stdin": stdin}})
+                with open(record, "w") as fh:
+                    json.dump(calls, fh)
+                code = 0
+                """
+            )
+            + textwrap.dedent(body)
+            + "\nsys.exit(code)\n",
+            encoding="utf-8",
+        )
+        script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        return script
+
+    return _make
+
+
+@pytest.fixture
+def claude_calls(tmp_path: Path):
+    """Read back the invocations recorded by a `make_claude` script."""
+
+    def _calls(name: str = "claude") -> list[dict]:
+        record = tmp_path / f"{name}.calls.json"
+        if not record.exists():
+            return []
+        return json.loads(record.read_text())
+
+    return _calls
+
+
+def claude_prints(payload: dict) -> str:
+    """Script body that emits ``payload`` as the CLI's JSON result."""
+    return f"print(json.dumps({payload!r}))"
 
 
 # ------------------------------------------------------------- Telethon fakes

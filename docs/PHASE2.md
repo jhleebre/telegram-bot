@@ -25,8 +25,9 @@ For **each** increment:
 
 Recommended order (each is a self-contained milestone — ship and verify before the next):
 
-- [ ] **1. `claude -p` engine** (`engine/claude_cli.py`) — the shared subprocess wrapper + a trivial
+- [x] **1. `claude -p` engine** (`engine/claude_cli.py`) — the shared subprocess wrapper + a trivial
       smoke use (e.g. LLM-enriched text title/tags). Nothing else depends on this until it works.
+      **Shipped** — see "Increment 1 (as built)" below.
 - [ ] **2. Document files → Markdown** (`document_handler` + `converters/` + `files/originals.py`) —
       no review loop; simplest file pipeline. Includes `.md` passthrough.
 - [ ] **3. Image → described note** (`image_handler`, VLM via `claude -p`) — still no review loop.
@@ -77,15 +78,53 @@ already present. `claude` CLI is already installed (v2.1.187 verified).
 - Invoke headlessly via `asyncio.create_subprocess_exec` (non-blocking; surfaces progress to the
   UI as PROCESSING):
   ```
-  claude -p "<prompt>" --output-format json --model <model> \
+  claude -p --output-format json --model <model> \
          --add-dir <workdir> --add-dir <glossary_dir> [--permission-mode <mode>]
   ```
 - Parse the JSON result to capture **`session_id`** and the text output. Enforce a per-job
   timeout with cancellation.
 - Resume for the next turn (keeps full prior context — transcript, draft, glossary):
   ```
-  claude -p --resume <session_id> "<user reply>" --output-format json
+  claude -p --resume <session_id> --output-format json
   ```
+
+### Increment 1 (as built)
+
+Delivered: `engine/claude_cli.py`, `engine/parsing.py`, `engine/prompts/` (+ `text_enrich.md`),
+engine settings in `config.py`, and the smoke use — **item E, LLM-enriched text notes**.
+
+Design points that differ from / firm up the sketch above:
+
+- **The prompt goes on stdin, not argv.** `claude -p` reads its prompt from stdin when no prompt
+  argument is given. Meeting transcripts and extracted documents can be large, and an argv-borne
+  prompt would eventually hit `ARG_MAX`. Verified against the real CLI.
+- **Runs are hermetic.** Every invocation adds `--strict-mcp-config --setting-sources ""
+  --disable-slash-commands`, so the bot's output can't drift with the owner's personal Claude Code
+  settings, MCP servers, or skills.
+- **`--system-prompt` per job**, replacing the default agent prompt: the pipelines are extractors,
+  not coding agents.
+- **No permission mode is needed** (open decision 1, resolved → *bot writes*): the engine is
+  text-in / text-out and Claude is never granted write access. `--add-dir` remains available for
+  read-only context (the glossary, in increment 5).
+- **Result JSON shape** (verified, CLI v2.1.187): `{result, session_id, is_error, subtype,
+  total_cost_usd, duration_ms, num_turns}` → `ClaudeResult`. Errors surface as `ClaudeUnavailable`
+  (no CLI), `ClaudeTimeout` (killed at the deadline), `ClaudeError` (non-zero exit / non-JSON /
+  `is_error`).
+- **`engine/parsing.extract_json_object`** tolerates ``` fences and prose around the JSON object,
+  since "reply with JSON only" is not a guarantee.
+- **Enrichment is an upgrade, never a dependency.** `handle_text` falls back to the Phase 1 path
+  (first line as title, no tags) on *any* failure, and `CLAUDE_ENABLED=false` skips the engine
+  entirely — the bot still captures notes offline. The note body is always the original text; the
+  LLM only supplies frontmatter.
+
+New settings (all optional, see `.env.example`): `CLAUDE_ENABLED` (default true), `CLAUDE_BIN`
+(`claude`), `CLAUDE_MODEL` (`sonnet`), `CLAUDE_TIMEOUT_SEC` (`120`; text enrichment self-caps at
+60s so a slow run can't stall ingestion of a plain memo).
+
+Tests: `test_claude_cli.py` drives the **real subprocess path** against a fake `claude` script on
+disk (argv, stdin delivery, resume, exit codes, timeout+kill, missing binary) — no model runs.
+`test_parsing.py`, `test_prompts.py`, and the enrichment/fallback cases in `test_text_handler.py`
+cover the rest. Suite: 88 → 145.
 
 ## Human-in-the-loop via session preservation
 
@@ -152,16 +191,32 @@ IDLE ──job needs review──▶ AWAITING_REVIEW ──owner reply (bot DM)�
 Audio → delete after success · Image → keep (embedded) · pdf/pptx/docx/… → move to `~/Downloads/`
 · Markdown → save to inbox (it *is* the note).
 
-## Open decisions to confirm before building Phase 2
+## Open decisions
 
-1. **File-writing responsibility** — let `claude -p` write the note/glossary directly (needs a
-   permissive `--permission-mode` + `--add-dir`) **or** have Claude return text and the bot write
-   files (safer, more testable). *Leaning: bot writes.*
+1. ~~**File-writing responsibility**~~ — **resolved (increment 1): the bot writes.** Claude returns
+   text only; the engine grants no write access, so no permissive `--permission-mode` is needed and
+   every pipeline stays unit-testable. Revisit only if a pipeline genuinely needs Claude to edit
+   files in place.
+4. ~~**Claude `--model` and per-job timeout budgets**~~ — **deferred cheaply (increment 1): both are
+   env-tunable** (`CLAUDE_MODEL`, `CLAUDE_TIMEOUT_SEC`), defaulting to `sonnet` / 120s. Per-job
+   overrides exist (text enrichment uses 60s). Audio/document jobs can raise their own budget when
+   built, so no up-front decision is needed.
+
+Still open (each is confirmed when its increment starts):
+
 2. Whether meeting notes should also trigger the glossary **git commit/push** the `/meeting` skill
-   does (both the vault and meeting-transcriber are git repos).
-3. Base document converter: `markitdown` vs `pandoc`-based vs Claude-skill-driven.
-4. Claude `--model` and per-job timeout budgets.
+   does (both the vault and meeting-transcriber are git repos). *(increment 5)*
+3. Base document converter: `markitdown` vs `pandoc`-based vs Claude-skill-driven. *(increment 2)*
 5. Whether to physically **share** the meeting-transcriber glossary file or copy/symlink it.
+   *(increment 5)*
+
+### Cost note
+
+A `claude -p` call carries ~9–14k cache-creation tokens (agent system prompt + tool definitions)
+regardless of prompt size — roughly $0.03–0.09 per cold call on `sonnet`. That is negligible for a
+personal capture bot at a few notes a day, but it is why `CLAUDE_ENABLED=false` exists and why
+enrichment is optional rather than load-bearing. If it ever matters, `CLAUDE_MODEL=haiku` is the
+first lever.
 
 ## Testing strategy
 

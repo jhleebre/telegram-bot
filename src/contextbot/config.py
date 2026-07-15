@@ -16,6 +16,14 @@ DEFAULT_INBOX_DIR = "~/Documents/MarkNotes/0_inbox"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SESSION_PATH = _PROJECT_ROOT / "state" / "contextbot.session"
 
+# Phase 2 engine defaults (`claude -p`). Model/timeout are env-tunable per pipeline needs.
+DEFAULT_CLAUDE_BIN = "claude"
+DEFAULT_CLAUDE_MODEL = "sonnet"
+DEFAULT_CLAUDE_TIMEOUT_SEC = 120.0
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
+
 
 class ConfigError(Exception):
     """Raised when required configuration is missing or invalid."""
@@ -36,6 +44,8 @@ class Settings:
     - ``telegram_bot_token``: Bot API client — send-only replies to the owner's bot DM.
     - ``owner_chat_id``: optional override for the reply target; normally derived from the user's
       own account id at runtime.
+    - ``claude_*``: Phase 2 engine — the headless ``claude -p`` CLI. When ``claude_enabled`` is
+      False (or the CLI is missing), pipelines fall back to their no-LLM path.
     """
 
     api_id: int
@@ -45,13 +55,19 @@ class Settings:
     inbox_dir: Path
     owner_chat_id: int | None = None
     log_level: str = "INFO"
+    claude_enabled: bool = True
+    claude_bin: str = DEFAULT_CLAUDE_BIN
+    claude_model: str = DEFAULT_CLAUDE_MODEL
+    claude_timeout_sec: float = DEFAULT_CLAUDE_TIMEOUT_SEC
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return (
             f"Settings(api_id={self.api_id}, api_hash=<hidden>, "
             f"session_path={self.session_path!s}, telegram_bot_token=<hidden>, "
             f"inbox_dir={self.inbox_dir!s}, owner_chat_id={self.owner_chat_id}, "
-            f"log_level={self.log_level!r})"
+            f"log_level={self.log_level!r}, claude_enabled={self.claude_enabled}, "
+            f"claude_bin={self.claude_bin!r}, claude_model={self.claude_model!r}, "
+            f"claude_timeout_sec={self.claude_timeout_sec})"
         )
 
     @classmethod
@@ -113,6 +129,32 @@ class Settings:
         if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             errors.append(f"LOG_LEVEL must be a valid level, got {log_level!r}")
 
+        claude_enabled = True
+        raw_enabled = (env.get("CLAUDE_ENABLED") or "").strip().lower()
+        if raw_enabled:
+            if raw_enabled in _TRUE_VALUES:
+                claude_enabled = True
+            elif raw_enabled in _FALSE_VALUES:
+                claude_enabled = False
+            else:
+                errors.append(f"CLAUDE_ENABLED must be true/false, got {raw_enabled!r}")
+
+        claude_bin = (env.get("CLAUDE_BIN") or DEFAULT_CLAUDE_BIN).strip()
+        claude_model = (env.get("CLAUDE_MODEL") or DEFAULT_CLAUDE_MODEL).strip()
+
+        claude_timeout_sec = DEFAULT_CLAUDE_TIMEOUT_SEC
+        raw_timeout = (env.get("CLAUDE_TIMEOUT_SEC") or "").strip()
+        if raw_timeout:
+            try:
+                claude_timeout_sec = float(raw_timeout)
+            except ValueError:
+                errors.append(f"CLAUDE_TIMEOUT_SEC must be a number, got {raw_timeout!r}")
+            else:
+                if claude_timeout_sec <= 0:
+                    errors.append(
+                        f"CLAUDE_TIMEOUT_SEC must be positive, got {claude_timeout_sec}"
+                    )
+
         if errors:
             raise ConfigError("Invalid configuration:\n  - " + "\n  - ".join(errors))
 
@@ -124,4 +166,8 @@ class Settings:
             inbox_dir=inbox_dir,
             owner_chat_id=owner_chat_id,
             log_level=log_level,
+            claude_enabled=claude_enabled,
+            claude_bin=claude_bin,
+            claude_model=claude_model,
+            claude_timeout_sec=claude_timeout_sec,
         )

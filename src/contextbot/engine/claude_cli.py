@@ -1,0 +1,220 @@
+"""Async wrapper over Claude Code's headless CLI (``claude -p``).
+
+This is the shared engine for every Phase 2 pipeline (text enrichment, image description,
+document structuring, meeting notes). It is deliberately **text-in / text-out**:
+
+- The prompt is written to the subprocess's **stdin**, not passed as an argv element, so long
+  inputs (meeting transcripts, extracted documents) cannot hit ``ARG_MAX``.
+- Claude is never granted write access. Per the Phase 2 open decision *"file-writing
+  responsibility"*, the **bot writes all files**; Claude only returns text. That keeps the
+  pipelines testable and means no permissive ``--permission-mode`` is needed.
+- ``session_id`` is captured from the JSON result so a later turn can ``--resume`` the same
+  session with full prior context — the basis of the Phase 2 human-in-the-loop review.
+
+Everything is non-blocking (``asyncio.create_subprocess_exec``) so the UI keeps repainting and
+the Telethon loop keeps running while a job is in flight.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Sequence
+
+logger = logging.getLogger("contextbot.engine.claude")
+
+DEFAULT_EXECUTABLE = "claude"
+DEFAULT_MODEL = "sonnet"
+DEFAULT_TIMEOUT_SEC = 120.0
+
+
+class ClaudeError(Exception):
+    """Base class for engine failures."""
+
+
+class ClaudeUnavailable(ClaudeError):
+    """The ``claude`` executable is not installed or not on PATH."""
+
+
+class ClaudeTimeout(ClaudeError):
+    """The job exceeded its timeout budget and was killed."""
+
+
+@dataclass(frozen=True)
+class ClaudeResult:
+    """A parsed ``--output-format json`` result."""
+
+    text: str
+    session_id: str | None = None
+    cost_usd: float = 0.0
+    duration_ms: int = 0
+    num_turns: int = 0
+    # Full decoded JSON, kept for diagnostics; excluded from equality/repr.
+    raw: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
+
+
+def _decode(stdout: bytes) -> dict[str, Any]:
+    """Decode the CLI's JSON result object, raising ClaudeError on malformed output."""
+    text = stdout.decode("utf-8", errors="replace").strip()
+    if not text:
+        raise ClaudeError("claude produced no output")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ClaudeError(f"claude returned non-JSON output: {text[:200]!r}") from exc
+    if not isinstance(data, dict):
+        raise ClaudeError(f"claude returned unexpected JSON: {type(data).__name__}")
+    return data
+
+
+class ClaudeCLI:
+    """Runs headless ``claude -p`` jobs and parses their JSON results.
+
+    Injectable into handlers so tests can substitute a fake without spawning a real model run.
+    """
+
+    def __init__(
+        self,
+        *,
+        executable: str = DEFAULT_EXECUTABLE,
+        model: str = DEFAULT_MODEL,
+        timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+        cwd: Path | None = None,
+    ) -> None:
+        self.executable = executable
+        self.model = model
+        self.timeout_sec = timeout_sec
+        self.cwd = cwd
+
+    def is_available(self) -> bool:
+        """True when the executable can be found on PATH (or is an existing absolute path)."""
+        return shutil.which(self.executable) is not None
+
+    def _build_argv(
+        self,
+        *,
+        system_prompt: str | None,
+        add_dirs: Sequence[Path],
+        resume: str | None,
+        session_id: str | None,
+    ) -> list[str]:
+        # No prompt argv element: the prompt goes to stdin (see module docstring).
+        argv = [self.executable, "-p", "--output-format", "json", "--model", self.model]
+        if system_prompt is not None:
+            argv += ["--system-prompt", system_prompt]
+        if resume is not None:
+            argv += ["--resume", resume]
+        elif session_id is not None:
+            argv += ["--session-id", session_id]
+        for directory in add_dirs:
+            argv += ["--add-dir", str(directory)]
+        # Keep runs hermetic and cheap: no MCP servers, no user/project settings, no skills.
+        argv += ["--strict-mcp-config", "--setting-sources", "", "--disable-slash-commands"]
+        return argv
+
+    async def run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        add_dirs: Sequence[Path] = (),
+        session_id: str | None = None,
+        resume: str | None = None,
+        timeout_sec: float | None = None,
+    ) -> ClaudeResult:
+        """Run one headless job and return its parsed result.
+
+        ``resume`` continues an existing session (Phase 2 review turns); ``session_id`` pins a new
+        session to a caller-chosen UUID. Raises :class:`ClaudeUnavailable`, :class:`ClaudeTimeout`,
+        or :class:`ClaudeError`.
+        """
+        if not self.is_available():
+            raise ClaudeUnavailable(f"{self.executable!r} not found on PATH")
+
+        argv = self._build_argv(
+            system_prompt=system_prompt,
+            add_dirs=add_dirs,
+            resume=resume,
+            session_id=session_id,
+        )
+        budget = timeout_sec if timeout_sec is not None else self.timeout_sec
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.cwd) if self.cwd else None,
+            )
+        except FileNotFoundError as exc:  # raced with is_available, or bad absolute path
+            raise ClaudeUnavailable(f"{self.executable!r} could not be executed") from exc
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(prompt.encode("utf-8")), timeout=budget
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            # Kill the child so a cancelled/late job cannot outlive the request.
+            await self._terminate(proc)
+            raise ClaudeTimeout(f"claude exceeded {budget:.0f}s") from None
+
+        if proc.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip()[:300]
+            raise ClaudeError(f"claude exited {proc.returncode}: {detail or '<no stderr>'}")
+
+        data = _decode(stdout)
+        if data.get("is_error") or data.get("subtype") not in (None, "success"):
+            raise ClaudeError(
+                f"claude reported an error ({data.get('subtype')}): "
+                f"{str(data.get('result'))[:200]}"
+            )
+
+        result = ClaudeResult(
+            text=(data.get("result") or "").strip(),
+            session_id=data.get("session_id"),
+            cost_usd=float(data.get("total_cost_usd") or 0.0),
+            duration_ms=int(data.get("duration_ms") or 0),
+            num_turns=int(data.get("num_turns") or 0),
+            raw=data,
+        )
+        logger.info(
+            "claude job done: model=%s turns=%d %dms $%.4f session=%s",
+            self.model,
+            result.num_turns,
+            result.duration_ms,
+            result.cost_usd,
+            result.session_id,
+        )
+        return result
+
+    async def resume_session(self, session_id: str, prompt: str, **kwargs: Any) -> ClaudeResult:
+        """Continue an existing session with a new turn (keeps full prior context)."""
+        return await self.run(prompt, resume=session_id, **kwargs)
+
+    @staticmethod
+    async def _terminate(proc: asyncio.subprocess.Process) -> None:
+        """Kill a still-running child and reap it, ignoring races where it already exited."""
+        if proc.returncode is not None:
+            return
+        try:
+            proc.kill()
+        except ProcessLookupError:  # pragma: no cover - exited between check and kill
+            return
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:  # pragma: no cover - unkillable child
+            logger.warning("claude subprocess did not exit after kill")
+
+
+def build_engine(settings) -> ClaudeCLI:
+    """Construct a :class:`ClaudeCLI` from :class:`~contextbot.config.Settings`."""
+    return ClaudeCLI(
+        executable=settings.claude_bin,
+        model=settings.claude_model,
+        timeout_sec=settings.claude_timeout_sec,
+    )

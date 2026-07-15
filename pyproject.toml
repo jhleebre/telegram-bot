@@ -12,6 +12,10 @@ readme = "README.md"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# Prompt templates are loaded from disk at runtime (see engine/prompts/__init__.py).
+"contextbot.engine.prompts" = ["*.md"]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]

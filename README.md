@@ -25,11 +25,16 @@ client can read Saved Messages history, which removes the 24h limit entirely.
 ## Status
 
 - **Phase 1 (implemented):** desktop app, Saved Messages ingestion with catch-up + live, bot-DM
-  confirmations, health checks, and **text → Markdown note**. Audio/image/document are stubbed with
-  a "coming in Phase 2" reply.
-- **Phase 2 (planned):** audio → meeting notes (local Whisper + `claude -p`, glossary correction
-  with human-in-the-loop review **in the bot DM**), images → described notes, and
-  pdf/pptx/docx/… → Markdown. See [docs/PHASE2.md](docs/PHASE2.md).
+  confirmations, health checks, and **text → Markdown note**.
+- **Phase 2 (in progress, one increment at a time):**
+  - ✅ **1. `claude -p` engine** — shared headless-CLI wrapper, plus its first use: text notes now
+    get an **LLM-derived title, tags, and summary**. Falls back to the Phase 1 path (first line as
+    title) whenever the CLI is missing, slow, or disabled, so notes are never lost and the bot
+    still works offline.
+  - ⬜ 2. documents (pdf/pptx/docx/…) → Markdown · ⬜ 3. images → described notes ·
+    ⬜ 4. human-in-the-loop review plumbing · ⬜ 5. audio → meeting notes
+
+  Audio/image/document still reply "Phase 2 예정". See [docs/PHASE2.md](docs/PHASE2.md).
 
 ## Setup
 
@@ -48,6 +53,10 @@ cp .env.example .env      # then fill in the values below
    <https://my.telegram.org> → *API development tools*. This is for reading your Saved Messages.
 2. **`TELEGRAM_BOT_TOKEN`** — create a bot with **@BotFather**, then **press Start on the bot once**
    (so it can DM you). This is for replies.
+
+Phase 2 also uses the **`claude` CLI** (already installed) to enrich notes. It needs no
+configuration — but `CLAUDE_MODEL`, `CLAUDE_TIMEOUT_SEC`, and `CLAUDE_ENABLED=false` (fully
+offline, no LLM) are available in `.env`.
 
 ### One-time login (you run this yourself)
 
@@ -115,7 +124,11 @@ src/contextbot/
 │   ├── health.py         # auth / bot-token / inbox / connection probes
 │   ├── security.py       # Saved-Messages self-peer guard
 │   └── status.py         # observable status model
-├── handlers/             # text handler (Phase 1) + Phase 2 stubs
+├── engine/
+│   ├── claude_cli.py     # async wrapper over headless `claude -p` (JSON result, sessions)
+│   ├── parsing.py        # recover a JSON object from a model's free-text reply
+│   └── prompts/          # prompt templates (*.md)
+├── handlers/             # text handler (+ LLM enrichment) + Phase 2 stubs
 ├── notes/                # frontmatter, filename, atomic markdown writer
 └── ui/                   # PySide6 window + asyncio worker thread
 login.py                  # one-time interactive login (user-run)

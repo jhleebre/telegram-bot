@@ -99,3 +99,51 @@ def test_aggregates_multiple_errors(tmp_path):
     assert "TELEGRAM_API_ID" in msg
     assert "TELEGRAM_API_HASH" in msg
     assert "TELEGRAM_BOT_TOKEN" in msg
+
+
+# ------------------------------------------------- Phase 2 engine settings
+def test_claude_defaults(tmp_path):
+    settings = Settings.load(_base_env(tmp_path), use_dotenv=False)
+    assert settings.claude_enabled is True
+    assert settings.claude_bin == "claude"
+    assert settings.claude_model == "sonnet"
+    assert settings.claude_timeout_sec == 120.0
+
+
+def test_claude_overrides(tmp_path):
+    env = _base_env(tmp_path)
+    env.update(
+        CLAUDE_BIN="/opt/homebrew/bin/claude",
+        CLAUDE_MODEL="opus",
+        CLAUDE_TIMEOUT_SEC="300",
+    )
+    settings = Settings.load(env, use_dotenv=False)
+    assert settings.claude_bin == "/opt/homebrew/bin/claude"
+    assert settings.claude_model == "opus"
+    assert settings.claude_timeout_sec == 300.0
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("false", False), ("0", False), ("no", False), ("off", False),
+     ("true", True), ("1", True), ("YES", True), ("On", True)],
+)
+def test_claude_enabled_parsing(tmp_path, raw, expected):
+    env = _base_env(tmp_path)
+    env["CLAUDE_ENABLED"] = raw
+    assert Settings.load(env, use_dotenv=False).claude_enabled is expected
+
+
+def test_invalid_claude_enabled(tmp_path):
+    env = _base_env(tmp_path)
+    env["CLAUDE_ENABLED"] = "maybe"
+    with pytest.raises(ConfigError, match="CLAUDE_ENABLED"):
+        Settings.load(env, use_dotenv=False)
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-5"])
+def test_invalid_claude_timeout(tmp_path, raw):
+    env = _base_env(tmp_path)
+    env["CLAUDE_TIMEOUT_SEC"] = raw
+    with pytest.raises(ConfigError, match="CLAUDE_TIMEOUT_SEC"):
+        Settings.load(env, use_dotenv=False)
