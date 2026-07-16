@@ -4,4 +4,11 @@ python-telegram-bot>=21,<22  # bot client: send-only replies to the owner's bot 
 PySide6>=6.6
 python-dotenv>=1.0
 PyYAML>=6.0
+# Local STT for meeting notes (Apple Silicon). Phase 2's one new runtime dependency.
+# NOTE: this package does **not** bring the model. mlx-whisper takes a HuggingFace repo id and
+# downloads ~1.5GB on first use — so run `python scripts/download_model.py` after installing, or
+# the first meeting note stalls for minutes while it fetches (and fails outright offline). The
+# health panel reports the weights' absence; the bot refuses to transcribe rather than downloading.
+# Needs `ffmpeg` on the system too: brew install ffmpeg
+mlx-whisper>=0.4
 # cryptg  # optional: speeds up Telethon's crypto (native extension)

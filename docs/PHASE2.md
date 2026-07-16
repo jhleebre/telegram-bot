@@ -1187,6 +1187,93 @@ completeness):
 **Verification bar (same as increments 2–4):** unit tests with a mocked engine and mocked STT (no
 model runs, no model downloads, no network), the whole suite green, then a real-app run.
 
+#### The decisions, settled — recorded before any code was written
+
+*(All five, in the order the handoff above poses them. The "as built" section is what came of them.)*
+
+**1. One at a time → a queue, and what is queued is the *asking*, not the job.**
+
+Addressing was rejected on ergonomics that decide it: a handle on every reply taxes the **common**
+case (one review, a bare `확인` from a phone) to fix the rare one, and a *forgotten* handle puts us
+straight back to guessing — the exact bug the one-at-a-time constraint exists to prevent. It moves
+the ambiguity onto the owner's typing discipline rather than removing it.
+
+The queue keeps the expensive work where it already is: `handle_audio` **always** downloads,
+transcribes, and runs turn 1, so the transcript, the session, and the draft all exist before the
+queue is consulted. Only then, if a review is already being asked about, the new review parks in a
+`QUEUED` state instead of being sent. **Promotion is therefore `created_at = now` plus one DM — it
+makes no LLM call and cannot fail.** That is what settles the design: promoting *by drafting later*
+would run an LLM turn from a background task with no handler to replay, needing its own retry
+driver, its own give-up counter, and its own answer for a usage limit — a second state machine
+beside the one increment 4 already built.
+
+Exactly one review is ever *asked about*, so a bare `확인` stays attributable and increment 4's
+constraint is **preserved rather than weakened**. And the clock rule falls out for free: `created_at`
+is stamped at promotion, which is precisely "the clock starts when the owner is asked".
+
+**2. Replay cost → cache the transcript, keyed by message id.** `state/audio/<message_id>/` holds
+the download and the transcript; each step is skipped when its output is already there. A
+`DeferMessage` **leaves the directory** — it *is* the cache — and every other exit deletes it. The
+key is sound because a Telegram message's media is immutable: the transcript of message N is a pure
+function of N. This costs ~15 lines and removes the one unbounded rework in the pipeline, because
+`DeferMessage` can only fire at turn 1, i.e. **after** Whisper has already run (a review turn never
+defers — increment 4). That is exactly the case the cache exists for.
+
+**3. Glossary git commit (open decision 2) → no. Append only.** Two reasons, and the second makes it
+moot. A `git add && commit && push` from a **poller background task** fails silently the moment
+credentials, network, or a conflict go wrong — and every one of increment 4's four bugs was a silent
+failure. More decisively: decision 4 puts the glossary **inside the vault**, which the owner already
+backs up wholesale to a private repo. The backup is the owner's existing routine; the bot has no
+business owning a step that is already owned, and `/meeting`'s own step 8-1 still commits it when
+they use that.
+
+**4. Glossary location (open decision 5) → the vault, at
+`~/Documents/MarkNotes/.claude/contextbot/glossary.md`.** **Owner's call**, and the reasoning is
+theirs: committing it into *this* repo would publish ~20KB of real names (SKT/Meta executives,
+internal product codenames) to `github.com/jhleebre/telegram-bot`; not committing it anywhere would
+leave the accumulated corrections unbacked-up; and the vault is already private, already backed up
+in full, and already the bot's output target. `GLOSSARY_PATH` overrides it.
+
+**Two facts were checked rather than assumed, and both had to hold or the choice defeats itself:**
+
+- **The vault's git tracks `.claude/`** (29 files) and its remote is `marknotes-data.git`, private.
+  So the glossary rides the existing vault backup. Had `.claude/` been ignored there, this location
+  would have quietly delivered the *opposite* of the backup it was chosen for.
+- **MarkNotes skips every entry starting with `.`** — `fileOperations.ts:16` (the file tree) and
+  `searchService.ts:80` (search). So the glossary is not a note, is not searchable, and never
+  appears in the vault UI. The owner's first instinct, `4_archive/4_glossary/`, would have made it
+  all three: a 20KB table of names sitting in the vault as a document.
+
+It lives under `.claude/contextbot/` rather than `.claude/skills/meeting/` because the vault's
+`skills/*` are **real skills the owner invokes**, and this is the bot's data parked in the vault —
+naming it so keeps it from advertising a skill that does not exist. **Migration done:** copied, not
+moved, so meeting-transcriber's `/meeting` keeps reading its own. A missing glossary is **not an
+error** — no substitutions, the note is still made, and the health probe says so.
+
+**5. Accept-time side effects → the review directory owns the audio; the glossary entries come from
+one resumed turn.** These are the two things "success" now means, and they land in a poller
+background task turns away from the handler that downloaded the file.
+
+- **The audio deletion is arranged rather than remembered.** The audio is staged in
+  `state/reviews/<id>/audio/` — inside the review's tree but **outside `work_dir`**, beside the
+  draft, so the model's view stays the transcript alone (increments 2-3's isolation rule still
+  binds). `store.remove()` already `rmtree`s that tree, so *deleting the audio is already what
+  ending a review does* — on accept, on cancel, on delivery, on expiry, with no new code and nothing
+  to forget. A deletion that someone has to remember is a deletion that leaks.
+- **The glossary rows are asked for at accept, on the resumed session.** Which corrections were
+  *confirmed* is knowable only from the conversation — the model proposed the terms, the owner
+  accepted some and corrected others. So accepting resumes the session once and asks for the
+  confirmed rows. Order: **LLM call → write the note → append the glossary → `store.remove()`** (the
+  audio dies there). Every side effect after the last LLM call, which is the one place that rule
+  still applies.
+- **Rejected: storing turn 1's proposed rows and appending those on accept.** A proposal the owner
+  *corrected* would then be appended as though confirmed, and a wrong glossary entry silently
+  mis-corrects every future meeting note. That is strictly worse than having no glossary at all —
+  it is the increment 2/3 fabrication trap with a persistence layer.
+- **It is best-effort by construction.** If the glossary turn fails (usage limit, lost session), the
+  **note is still written** and the reply says the glossary was skipped. `확인` must never cost the
+  owner the note they just approved.
+
 ## C. PDF → Markdown
 
 - **PDF only.** Stage the downloaded PDF alone in a temp dir, `--add-dir` that dir, and let Claude
@@ -1227,15 +1314,24 @@ embed, which falls back to `~/Downloads/`** · pdf/txt/csv → move to `~/Downlo
 
 Still open (each is confirmed when its increment starts):
 
-2. Whether meeting notes should also trigger the glossary **git commit/push** the `/meeting` skill
-   does (both the vault and meeting-transcriber are git repos). *(increment 5)*
+2. ~~Whether meeting notes should also trigger the glossary **git commit/push** the `/meeting` skill
+   does~~ — **resolved (increment 5): no, append only.** A commit/push from the poller's background
+   task is a silent failure waiting on credentials/network/conflicts, and decision 5 below makes it
+   moot: the glossary now lives in the vault, which the owner already backs up in full to a private
+   repo. See *The decisions, settled* → 3. *(resolved)*
 3. ~~Base document converter~~ — **resolved: PDF only, read natively by Claude Code.** No library
    (owner's call — library output is mediocre on layout), no shell-armed agent, and no LibreOffice:
    the owner exports to PDF from MS Office. Probed: 3 turns / ~$0.041 / zero tool denials / no
    permission mode. See *Next up: increment 2*. *(resolved)*
 
-5. Whether to physically **share** the meeting-transcriber glossary file or copy/symlink it.
-   *(increment 5)*
+5. ~~Whether to physically **share** the meeting-transcriber glossary file or copy/symlink it.~~ —
+   **resolved (increment 5, owner's call): neither — it moves into the vault**, at
+   `~/Documents/MarkNotes/.claude/contextbot/glossary.md` (`GLOSSARY_PATH` overrides). Sharing
+   meeting-transcriber's copy would tie the bot to a project the owner expects to stop using;
+   committing one here would publish real names to a public repo; a gitignored local copy would
+   never be backed up. The vault is private, already backed up wholesale to `marknotes-data.git`,
+   and invisible to MarkNotes under `.claude/` (verified both). See *The decisions, settled* → 4.
+   *(resolved)*
 
 6. **Should the bot DM answer when nobody asked it anything?** *(raised by the owner during
    increment 4; deliberately not built there)* Today, talking to the bot with no review open is a

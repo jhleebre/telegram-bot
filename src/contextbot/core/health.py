@@ -96,6 +96,55 @@ async def _claude_engine(settings) -> ProbeResult:
     return ProbeResult("claude-engine", True, f"{resolved} ({settings.claude_model})")
 
 
+def _whisper_stt(settings) -> ProbeResult:
+    """Probe the local STT stack: the package, the **weights**, and ffmpeg.
+
+    Never fatal — every other pipeline works without it, so a missing piece is DEGRADED.
+
+    **The weights are the reason this probe exists** (docs/PHASE2.md, increment 5). The model is a
+    HuggingFace repo id rather than a package dependency, so `pip install` does not bring it and
+    nobody ever installs it: `mlx_whisper` fetches ~1.5GB on first use, silently, *inside* whatever
+    job asked first. That job is a meeting note the owner is waiting on — minutes of unexplained
+    stall, or an outright failure offline. This turns it into a line on the health panel they can
+    act on before they send a recording, and it costs nothing: the check is local and offline.
+
+    On this machine it will always read green (meeting-transcriber cached the weights years-deep),
+    which is exactly why it is written down rather than trusted to be noticed. Same shape as
+    increment 1's Dock PATH bug: unreproducible where it was developed.
+    """
+    from ..stt import whisper
+
+    if not whisper.package_is_installed():
+        return ProbeResult(
+            "whisper-stt", False, "mlx-whisper not installed — audio notes unavailable"
+        )
+    if not whisper.model_is_cached(settings.whisper_model):
+        return ProbeResult(
+            "whisper-stt",
+            False,
+            f"model not downloaded ({settings.whisper_model}, {whisper.MODEL_SIZE_HINT}) — "
+            "run: .venv/bin/python scripts/download_model.py",
+        )
+    ffmpeg = whisper.resolve_ffmpeg()
+    if ffmpeg is None:
+        # Resolved the increment-1 way, so this reports what a *Dock-launched* app would see —
+        # which is the only launch that has ever hit this bug.
+        return ProbeResult("whisper-stt", False, "ffmpeg not found — install: brew install ffmpeg")
+    return ProbeResult("whisper-stt", True, f"{settings.whisper_model} · ffmpeg {ffmpeg}")
+
+
+def _glossary(settings) -> ProbeResult:
+    """Probe the meeting glossary. Absent is **not** a failure — it is a valid, quiet state.
+
+    Reported anyway because it is otherwise invisible: a glossary at the wrong path means every
+    meeting note silently loses its term corrections, and nothing else would ever say so.
+    """
+    path = settings.glossary_path
+    if not path.is_file():
+        return ProbeResult("glossary", True, f"none at {path} — meeting notes skip term corrections")
+    return ProbeResult("glossary", True, f"{path} ({path.stat().st_size // 1024}KB)")
+
+
 class HealthChecker:
     """Runs the health probes against the Telethon client, the reply bot, and settings."""
 
@@ -136,12 +185,16 @@ class HealthChecker:
         inbox = _inbox_writable(self._settings.inbox_dir)
         connection = self._connection_probe()
         claude = await _claude_engine(self._settings)
+        stt = _whisper_stt(self._settings)
+        glossary = _glossary(self._settings)
 
         if not auth.ok or not token.ok:
             overall = HealthStatus.ERROR
-        elif not inbox.ok or not claude.ok:
+        elif not inbox.ok or not claude.ok or not stt.ok:
             overall = HealthStatus.DEGRADED
         else:
             overall = HealthStatus.HEALTHY
 
-        return HealthReport(overall=overall, probes=[auth, token, inbox, connection, claude])
+        return HealthReport(
+            overall=overall, probes=[auth, token, inbox, connection, claude, stt, glossary]
+        )

@@ -1,8 +1,24 @@
 from dataclasses import replace
 
+import pytest
+
 from contextbot.core.health import HealthChecker, HealthStatus
+from contextbot.stt import whisper
 
 from .conftest import FakeBot, FakeClient
+
+
+@pytest.fixture(autouse=True)
+def stt_present(monkeypatch):
+    """Pin the STT probe healthy unless a test says otherwise.
+
+    Without this the suite would assert against *this machine's* HuggingFace cache — a green
+    `test_healthy` would mean "the owner happens to have 1.5GB of weights", and the suite would go
+    red on any machine that does not. The probe's own states are tested below, deliberately.
+    """
+    monkeypatch.setattr(whisper, "package_is_installed", lambda: True)
+    monkeypatch.setattr(whisper, "model_is_cached", lambda model: True)
+    monkeypatch.setattr(whisper, "resolve_ffmpeg", lambda executable="ffmpeg": "/opt/homebrew/bin/ffmpeg")
 
 
 async def test_healthy(settings):
@@ -147,3 +163,77 @@ async def test_undeterminable_auth_does_not_cry_wolf(settings, make_claude):
 
     assert report.probe("claude-engine").ok
     assert report.overall == HealthStatus.HEALTHY
+
+
+# ------------------------------------------------- whisper-stt probe (increment 5)
+async def _report(settings):
+    client = FakeClient(authorized=True)
+    await client.connect()
+    return await HealthChecker(client, FakeBot(), settings).check()
+
+
+async def test_stt_probe_reports_the_model_and_ffmpeg(settings):
+    report = await _report(settings)
+
+    probe = report.probe("whisper-stt")
+    assert probe.ok
+    assert settings.whisper_model in probe.detail
+    assert "ffmpeg" in probe.detail
+
+
+async def test_an_undownloaded_model_is_degraded_not_error(settings, monkeypatch):
+    """The whole reason this probe exists.
+
+    The weights are an HF repo id, not a package dependency, so `pip install` never brings them and
+    nobody installs them: mlx_whisper fetches 1.5GB *inside* the first job that needs it — minutes
+    of unexplained stall, or an outright failure offline. DEGRADED, never ERROR: every other
+    pipeline still works, so this must not stop the bot.
+    """
+    monkeypatch.setattr(whisper, "model_is_cached", lambda model: False)
+
+    report = await _report(settings)
+
+    assert not report.probe("whisper-stt").ok
+    assert "download_model.py" in report.probe("whisper-stt").detail
+    assert report.overall == HealthStatus.DEGRADED
+
+
+async def test_a_missing_package_is_degraded(settings, monkeypatch):
+    monkeypatch.setattr(whisper, "package_is_installed", lambda: False)
+
+    report = await _report(settings)
+
+    assert not report.probe("whisper-stt").ok
+    assert "mlx-whisper" in report.probe("whisper-stt").detail
+    assert report.overall == HealthStatus.DEGRADED
+
+
+async def test_a_missing_ffmpeg_is_degraded(settings, monkeypatch):
+    """The increment-1 PATH bug's third appearance: /opt/homebrew/bin is invisible from the Dock."""
+    monkeypatch.setattr(whisper, "resolve_ffmpeg", lambda executable="ffmpeg": None)
+
+    report = await _report(settings)
+
+    assert not report.probe("whisper-stt").ok
+    assert "ffmpeg" in report.probe("whisper-stt").detail
+    assert report.overall == HealthStatus.DEGRADED
+
+
+async def test_a_missing_glossary_is_reported_but_not_a_failure(settings):
+    """Absent is a valid, quiet state — but an invisible one, and a glossary at the wrong path
+    means every meeting note silently loses its term corrections."""
+    report = await _report(settings)
+
+    probe = report.probe("glossary")
+    assert probe.ok
+    assert "none at" in probe.detail
+    assert report.overall == HealthStatus.HEALTHY
+
+
+async def test_a_present_glossary_is_reported(settings):
+    settings.glossary_path.write_text("| 팀웹 | T-map | 제품명 | |\n", encoding="utf-8")
+
+    probe = (await _report(settings)).probe("glossary")
+
+    assert probe.ok
+    assert str(settings.glossary_path) in probe.detail

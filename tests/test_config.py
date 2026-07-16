@@ -147,6 +147,52 @@ def test_claude_overrides(tmp_path):
     assert settings.claude_timeout_sec == 300.0
 
 
+# --------------------------------------------------------- increment 5: audio
+def test_meeting_and_whisper_defaults(tmp_path):
+    settings = Settings.load(_base_env(tmp_path), use_dotenv=False)
+    assert settings.claude_meeting_model == "sonnet"
+    assert settings.whisper_model == "mlx-community/whisper-large-v3-turbo"
+    assert settings.whisper_language == "ko"
+
+
+def test_meeting_and_whisper_overrides(tmp_path):
+    env = _base_env(tmp_path)
+    env.update(
+        CLAUDE_MEETING_MODEL="opus",
+        WHISPER_MODEL="mlx-community/whisper-tiny",
+        WHISPER_LANGUAGE="en",
+    )
+    settings = Settings.load(env, use_dotenv=False)
+    assert settings.claude_meeting_model == "opus"
+    assert settings.whisper_model == "mlx-community/whisper-tiny"
+    assert settings.whisper_language == "en"
+
+
+def test_glossary_defaults_into_the_vault(tmp_path):
+    """It lives in the vault, not this repo: private, and already backed up by the owner."""
+    settings = Settings.load(_base_env(tmp_path), use_dotenv=False)
+    assert settings.glossary_path == Path(
+        "~/Documents/MarkNotes/.claude/contextbot/glossary.md"
+    ).expanduser()
+
+
+def test_glossary_path_override(tmp_path):
+    env = _base_env(tmp_path)
+    env["GLOSSARY_PATH"] = str(tmp_path / "terms.md")
+    assert Settings.load(env, use_dotenv=False).glossary_path == tmp_path / "terms.md"
+
+
+def test_a_missing_glossary_is_not_a_config_error(tmp_path):
+    """Absent is a valid state — no substitutions, note still made. Not a reason to refuse to start.
+
+    Unlike INBOX_DIR, whose parent must be the real knowledge base.
+    """
+    env = _base_env(tmp_path)
+    env["GLOSSARY_PATH"] = str(tmp_path / "nowhere" / "terms.md")
+    settings = Settings.load(env, use_dotenv=False)
+    assert not settings.glossary_path.exists()
+
+
 
 
 @pytest.mark.parametrize(

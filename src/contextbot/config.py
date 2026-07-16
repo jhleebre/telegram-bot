@@ -14,6 +14,13 @@ except ImportError:  # pragma: no cover - dotenv is a declared dependency
 DEFAULT_INBOX_DIR = "~/Documents/MarkNotes/0_inbox"
 # Where originals (pdf/txt/csv) land once their note is written. See files/originals.py.
 DEFAULT_DOWNLOADS_DIR = "~/Downloads"
+# The meeting glossary (STT mis-transcription → the right word). It lives **in the vault**, and the
+# location is load-bearing rather than tidy (docs/PHASE2.md, increment 5, decision 4): the vault is
+# private and already backed up wholesale to the owner's own data repo, so the accumulated
+# corrections ride that backup instead of needing a git step of the bot's own. Under `.claude/`
+# because MarkNotes skips every entry starting with a dot — so the glossary is not a note, is not
+# searchable, and never shows up in the vault UI. Missing is fine: no substitutions, note still made.
+DEFAULT_GLOSSARY_PATH = "~/Documents/MarkNotes/.claude/contextbot/glossary.md"
 # Project root is two levels up from this file (src/contextbot/config.py).
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SESSION_PATH = _PROJECT_ROOT / "state" / "contextbot.session"
@@ -32,6 +39,16 @@ DEFAULT_CLAUDE_PDF_MODEL = "opus"
 # defaulting to opus. CLAUDE_IMAGE_MODEL is the dial if a real photo ever proves harder.
 DEFAULT_CLAUDE_IMAGE_MODEL = "sonnet"
 DEFAULT_CLAUDE_TIMEOUT_SEC = 120.0
+# Drafting a meeting note is the heaviest text job in the project: a long transcript in, a whole
+# structured note out, plus the glossary to apply and terms to flag. It gets a floor well above the
+# default budget rather than a model bump — the PDF route's flakiness was about *reading* a
+# document, and there is nothing to read here but text.
+DEFAULT_CLAUDE_MEETING_MODEL = "sonnet"
+# Whisper. The model is an HF repo id, not a file — see stt/whisper.py, which refuses to download it
+# mid-job. `ko` because the meetings are Korean; Whisper does detect language, but telling it beats
+# letting it guess on the first few seconds of small talk.
+DEFAULT_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
+DEFAULT_WHISPER_LANGUAGE = "ko"
 # How long a pending review waits for the owner before its draft is delivered unreviewed. Capped by
 # reality rather than taste: the Bot API retains updates for 24h, so a reply sent past that window
 # while the app is closed is dropped by Telegram and the review could never be finished anyway.
@@ -71,6 +88,7 @@ class Settings:
     telegram_bot_token: str
     inbox_dir: Path
     downloads_dir: Path = Path(DEFAULT_DOWNLOADS_DIR).expanduser()
+    glossary_path: Path = Path(DEFAULT_GLOSSARY_PATH).expanduser()
     owner_chat_id: int | None = None
     log_level: str = "INFO"
     claude_enabled: bool = True
@@ -78,7 +96,10 @@ class Settings:
     claude_model: str = DEFAULT_CLAUDE_MODEL
     claude_pdf_model: str = DEFAULT_CLAUDE_PDF_MODEL
     claude_image_model: str = DEFAULT_CLAUDE_IMAGE_MODEL
+    claude_meeting_model: str = DEFAULT_CLAUDE_MEETING_MODEL
     claude_timeout_sec: float = DEFAULT_CLAUDE_TIMEOUT_SEC
+    whisper_model: str = DEFAULT_WHISPER_MODEL
+    whisper_language: str = DEFAULT_WHISPER_LANGUAGE
     review_expiry_hours: float = DEFAULT_REVIEW_EXPIRY_HOURS
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
@@ -86,12 +107,16 @@ class Settings:
             f"Settings(api_id={self.api_id}, api_hash=<hidden>, "
             f"session_path={self.session_path!s}, telegram_bot_token=<hidden>, "
             f"inbox_dir={self.inbox_dir!s}, downloads_dir={self.downloads_dir!s}, "
+            f"glossary_path={self.glossary_path!s}, "
             f"owner_chat_id={self.owner_chat_id}, "
             f"log_level={self.log_level!r}, claude_enabled={self.claude_enabled}, "
             f"claude_bin={self.claude_bin!r}, claude_model={self.claude_model!r}, "
             f"claude_pdf_model={self.claude_pdf_model!r}, "
             f"claude_image_model={self.claude_image_model!r}, "
+            f"claude_meeting_model={self.claude_meeting_model!r}, "
             f"claude_timeout_sec={self.claude_timeout_sec}, "
+            f"whisper_model={self.whisper_model!r}, "
+            f"whisper_language={self.whisper_language!r}, "
             f"review_expiry_hours={self.review_expiry_hours})"
         )
 
@@ -154,6 +179,11 @@ class Settings:
         # this is created on demand the first time an original is moved.
         downloads_dir = _expand(env.get("DOWNLOADS_DIR") or DEFAULT_DOWNLOADS_DIR)
 
+        # Also unchecked, and deliberately so: an absent glossary is a valid state (a fresh machine,
+        # or an owner who does not want one). It means no substitutions, not a broken pipeline, and
+        # the health probe is where that gets said rather than a startup failure.
+        glossary_path = _expand(env.get("GLOSSARY_PATH") or DEFAULT_GLOSSARY_PATH)
+
         log_level = (env.get("LOG_LEVEL") or "INFO").strip().upper()
         if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             errors.append(f"LOG_LEVEL must be a valid level, got {log_level!r}")
@@ -172,6 +202,12 @@ class Settings:
         claude_model = (env.get("CLAUDE_MODEL") or DEFAULT_CLAUDE_MODEL).strip()
         claude_pdf_model = (env.get("CLAUDE_PDF_MODEL") or DEFAULT_CLAUDE_PDF_MODEL).strip()
         claude_image_model = (env.get("CLAUDE_IMAGE_MODEL") or DEFAULT_CLAUDE_IMAGE_MODEL).strip()
+        claude_meeting_model = (
+            env.get("CLAUDE_MEETING_MODEL") or DEFAULT_CLAUDE_MEETING_MODEL
+        ).strip()
+
+        whisper_model = (env.get("WHISPER_MODEL") or DEFAULT_WHISPER_MODEL).strip()
+        whisper_language = (env.get("WHISPER_LANGUAGE") or DEFAULT_WHISPER_LANGUAGE).strip()
 
         claude_timeout_sec = DEFAULT_CLAUDE_TIMEOUT_SEC
         raw_timeout = (env.get("CLAUDE_TIMEOUT_SEC") or "").strip()
@@ -209,6 +245,7 @@ class Settings:
             telegram_bot_token=token,
             inbox_dir=inbox_dir,
             downloads_dir=downloads_dir,
+            glossary_path=glossary_path,
             owner_chat_id=owner_chat_id,
             log_level=log_level,
             claude_enabled=claude_enabled,
@@ -216,6 +253,9 @@ class Settings:
             claude_model=claude_model,
             claude_pdf_model=claude_pdf_model,
             claude_image_model=claude_image_model,
+            claude_meeting_model=claude_meeting_model,
             claude_timeout_sec=claude_timeout_sec,
+            whisper_model=whisper_model,
+            whisper_language=whisper_language,
             review_expiry_hours=review_expiry_hours,
         )

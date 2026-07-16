@@ -40,6 +40,9 @@ def settings(inbox: Path, tmp_path: Path) -> Settings:
         inbox_dir=inbox,
         # Never the real ~/Downloads: document handlers move originals here.
         downloads_dir=tmp_path / "Downloads",
+        # Never the real vault glossary: accepting a meeting note **appends** to this file, so a
+        # default here would have the suite editing the owner's own accumulated corrections.
+        glossary_path=tmp_path / "glossary.md",
         owner_chat_id=None,
         log_level="INFO",
         # Off by default so handler tests exercise the no-LLM path unless they opt in.
