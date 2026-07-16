@@ -12,8 +12,9 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > *Usage-limit policy* (binding on every later increment) → *Writing Markdown: ranges take a
 > hyphen* (binding on every prompt) → *The resume contract* (measured; it rules out the staging
 > pattern increments 2–3 use) → *Increment 4 (as built)* (the review state machine increment 5
-> builds on, and the rules that hold it together) → *Next up: increment 5*.
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **454 passing**, no network or model runs.
+> builds on, and the rules that hold it together) → *Next up: increment 5* (**start with its
+> removal boundary** — increment 5 both deletes `#검토` and replaces it as the review's producer).
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **474 passing**, no network or model runs.
 
 **Ingestion recap (from the Phase 1 hybrid):** input files arrive via **Saved Messages** (Telethon)
 and are downloaded to a temp dir with `message.download_media(...)`. The **review conversation runs
@@ -45,7 +46,9 @@ Recommended order (each is a self-contained milestone — ship and verify before
       **Shipped and owner-verified** — see "Increment 3 (as built)" below.
 - [x] **4. Human-in-the-loop plumbing** (`core/session_store.py`, `handlers/conversation.py`,
       `core/review_poller.py`) — the review state machine, built and verified on a simple case
-      (`#검토 <memo>`) rather than wired into audio. **Shipped** — see "Increment 4 (as built)".
+      (`#검토 <memo>`) rather than wired into audio. **Shipped and owner-verified** — see
+      "Increment 4 (as built)". The `#검토` route is **scaffolding that increment 5 deletes**, as
+      its last step; the removal boundary is written out in the increment 5 handoff.
 - [ ] **5. Audio → meeting note** (`audio_handler`, `mlx-whisper`, glossary, review) — the most
       complex; depends on 1 and 4. **Next up** — the handoff is "Next up: increment 5" below.
 
@@ -265,21 +268,33 @@ src/contextbot/
 │   ├── session_store.py    # ✅ increment 4 — the pending review: draft, resume handle, work dir
 │   └── review_poller.py    # ✅ increment 4 — bot-DM getUpdates, only while a review is open
 ├── handlers/
-│   ├── audio_handler.py    # (fill in) audio → meeting note
+│   ├── audio_handler.py    # (fill in) audio → meeting note — increment 5's producer
 │   ├── image_handler.py    # ✅ built in increment 3 — image → described note
 │   ├── document_handler.py # ✅ built in increment 2 — md / txt / csv / pdf / unsupported
 │   ├── downloads.py        # ✅ built in increment 3 — shared attachment download (audio is next)
 │   └── conversation.py     # ✅ increment 4 — the whole review lifecycle: start, reply, end
+│                           #    (increment 5 deletes its `#검토` scaffolding — see the handoff)
+├── stt/                    # (increment 5) — ported from meeting-transcriber, not imported from it
+│   └── whisper.py          # transcribe() + model-presence check; ffmpeg resolved, not assumed
 └── files/                  # ✅ built in increments 2–3
     ├── originals.py        # original-file policy (Downloads / delete / keep-and-embed)
     ├── images.py           # ✅ increment 3 — heic/bmp → PNG, so the model actually *sees* it
     └── text_files.py       # encoding detection + deterministic CSV → Markdown table
 ```
 
+*(`stt/` is a suggestion, not a decision — increment 5 places it. The point it encodes: the STT
+code is **ported in**, so the bot never depends on `~/Projects/meeting-transcriber/` at runtime.)*
+
 Additional runtime deps: `mlx-whisper` (STT, Apple Silicon) — **and nothing else**. Documents need
 no converter library and no LibreOffice: the scope is PDF-only and Claude Code reads PDFs natively
 (see decision 3). Images need no imaging library: `sips` ships with macOS (increment 3). `ffmpeg` is
-already present. `claude` CLI is already installed (v2.1.187 verified).
+already present (`/opt/homebrew/bin` — so it must be *resolved*, not assumed on PATH). `claude` CLI
+is already installed (v2.1.187 verified).
+
+**`mlx-whisper` is not installed in this project's venv yet** (it lives in meeting-transcriber's),
+and it brings a **1.5GB model** that is not a package dependency at all — `mlx_whisper` fetches it
+from HuggingFace on first use. Both are increment 5's to own; the measured details are in *Next up:
+increment 5 → The STT dependency*.
 
 ## Engine: `claude -p` wrapper (`engine/claude_cli.py`)
 
@@ -386,8 +401,11 @@ PATH** (`/usr/local/bin:/bin:/usr/bin`) rather than the login shell's, and the `
 (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.claude/local`, `~/.local/bin`) after a PATH lookup
 fails; `CLAUDE_BIN` remains the escape hatch for anything unusual (e.g. an nvm/npm install).
 
-The lesson generalizes past this one binary: **increment 5's `mlx-whisper` and `ffmpeg` will hit
-exactly the same wall** — resolve them the same way rather than assuming PATH.
+The lesson generalizes past this one binary, and it has since been **confirmed by measurement**:
+increment 5's `ffmpeg` really does live in `/opt/homebrew/bin`, so it hits exactly the same wall
+from the Dock. Resolve it the same way rather than assuming PATH — see the STT dependency table
+under *Next up: increment 5*, which also records the same shape of trap for the Whisper *model*
+(cached here, absent on a fresh machine, downloaded silently mid-job).
 
 #### Usage limits / API errors (verified by injecting a 429)
 
@@ -796,7 +814,7 @@ Delivered: `core/session_store.py` (the pending review), `core/review_poller.py`
 **a module the sketch above did not name**, because the split from `Notifier` earns its own file),
 `handlers/conversation.py` (the whole review lifecycle), `engine/prompts/review_draft.md` +
 `review_revise.md`, `ClaudeSessionLost`, the `REVIEW_EXPIRY_HOURS` setting, and the `ClientService`
-wiring. Suite: 341 → **454**.
+wiring. Suite: 341 → **474**.
 
 **The simple case it was built and verified on is `#검토 <memo>`** — the delivery approach's advice,
 followed literally: no Whisper, no download, no staging, but the same multi-turn resume contract
@@ -1006,8 +1024,17 @@ care — so the assumption stays for increment 5.
 no engine call in them — the turn-1/turn-2 engine interaction is byte-for-byte what was driven — and
 each is unit-covered.)*
 
-**Owner verification: pending.** The bot-DM poller is the one part no unit test can prove, since it
-is the real Bot API's behaviour. Everything else above ran for real.
+**Owner verification: ✅ done.** The owner drove the `#검토` loop in the real app and it passed —
+which is what closes the **bot-DM poller**, the one part no unit test can prove because it is the
+real Bot API's behaviour talking to a real phone. Everything else above had already run for real.
+
+**Four bugs came out of the work *after* that verification** — three from reviewing this
+increment's own diff, one from the owner asking what happens if you talk to the bot with no review
+open. All four are fixed and covered; they are listed in the "as built" bullets above. The pattern
+is worth naming, because increment 5 will meet it: **every one was a silent failure**. Nothing
+raised, nothing logged, the suite stayed green — a mangled memo, an undeliverable question, a
+permanently wedged review, an impatient "얼마나 걸려?" applied as a correction. A review loop's
+failures are quiet by construction, because the only witness is a person reading a DM.
 
 ### Next up: increment 5 — audio → meeting note
 
@@ -1076,6 +1103,52 @@ mechanical delete rather than an archaeology exercise:
   as the review) or the deletion must be given up on deliberately. The glossary append is a side
   effect **after the last LLM call** of the last turn, which is the one place the rule still holds.
 
+#### The STT dependency — measured, and the trap is that it looks fine on this machine
+
+`~/Projects/meeting-transcriber/` is the reference implementation: **read it, and lift what you
+need.** Measured on this machine (2026-07-16):
+
+| Thing | Where it actually is | State |
+|-------|----------------------|-------|
+| `transcribe.py` | `~/Projects/meeting-transcriber/.claude/skills/meeting/scripts/transcribe.py` | 6.2KB, a clean `transcribe(...)` function + CLI — **port the function, don't shell out to it** |
+| `SKILL.md` | same dir | 8.9KB — the meeting-note template and steps the prompt must carry |
+| `glossary.md` | same dir | **19.9KB**, shared (open decision 5: share / copy / symlink) |
+| **`mlx-whisper`** (package) | meeting-transcriber's **own venv**, v0.1.0 | ❌ **not in this project's venv** → `requirements.txt` |
+| **model weights** | `~/.cache/huggingface/hub/models--mlx-community--whisper-large-v3-turbo` | ✅ cached — **1.5GB** |
+| `ffmpeg` | `/opt/homebrew/bin/ffmpeg` | ✅ present — and see the PATH trap below |
+
+**The model is an HF repo id, not a vendored file.** `transcribe.py` passes
+`path_or_hf_repo="mlx-community/whisper-large-v3-turbo"`, and `mlx_whisper` **downloads it on first
+use** if it is not cached. So "install the model" is not a step anyone wrote — it is a side effect
+of the first transcription.
+
+**That is the trap, and it is increment 1's PATH bug wearing a third hat: it cannot fail here.**
+The 1.5GB is already cached *because the owner uses meeting-transcriber*, so on this machine the
+first run will be instant and correct. On a fresh machine — or after a cache clear — the first
+meeting audio would instead **stall for minutes mid-job, silently, downloading 1.5GB, and fail
+outright with no network**. Development cannot catch it, exactly as a terminal-launched app could
+never catch the Dock's PATH.
+
+**So the repo must own this rather than inherit it** (the owner's call — independence and
+completeness):
+
+- **The package** goes in `requirements.txt`. It is Phase 2's one new runtime dependency, as planned.
+- **The weights must be *deliberately* present, not incidentally.** Detect the cache, and make
+  acquiring it an explicit, visible step rather than a stall inside someone's meeting note. The
+  natural home is the **`claude-engine`-style health probe** (`core/health.py`): a probe that
+  reports **DEGRADED — model not downloaded** costs nothing, is local, and turns an invisible
+  multi-minute hang into a thing the owner can see and act on *before* they send a recording.
+  Consider a warm-up/`--download` path too; do **not** let a 1.5GB fetch happen for the first time
+  inside a job that the owner is waiting on.
+- **Do not import from `~/Projects/meeting-transcriber/`.** Port the code in. That project is the
+  source to read, not a runtime dependency — the bot must stand alone. (The *glossary* is the one
+  genuine cross-project file, and that is open decision 5.)
+- **`mlx-whisper` and `ffmpeg` both live in `/opt/homebrew/bin`-shaped places**, so both hit the
+  launchd-PATH wall from the Dock (increment 1). `mlx-whisper` is imported, so it follows the venv
+  rather than PATH — but **`ffmpeg` is a subprocess and will not be found**. Resolve it the way
+  `engine/claude_cli.resolve_executable` does. This is the *third* time this exact bug will have
+  been available to us; it is the one increment-1 lesson that keeps paying.
+
 **What increment 4 leaves you (do not re-invent):**
 
 - **`conversation.start`-shaped work is already done.** `handle_review_request` is the *producer*
@@ -1088,8 +1161,8 @@ mechanical delete rather than an archaeology exercise:
   context from *outside*, so it is a second `--add-dir`, never a copy into the work dir.
 - **`handlers/downloads.download_attachment`** is the shared download helper — audio is its third
   caller, as increment 3 predicted.
-- **`mlx-whisper` and `ffmpeg` will hit the launchd-PATH wall** that `claude` hit (increment 1).
-  Resolve them like `resolve_executable` does; do not assume PATH.
+- **`engine/claude_cli.resolve_executable`** is the PATH-resolution pattern `ffmpeg` needs — see
+  the STT section above, where this bug is now measured rather than predicted.
 
 **The decisions increment 5 has to make (each one is genuinely open):**
 
@@ -1164,6 +1237,21 @@ Still open (each is confirmed when its increment starts):
 5. Whether to physically **share** the meeting-transcriber glossary file or copy/symlink it.
    *(increment 5)*
 
+6. **Should the bot DM answer when nobody asked it anything?** *(raised by the owner during
+   increment 4; deliberately not built there)* Today, talking to the bot with no review open is a
+   **silent no-op** — nothing polls, the message sits in Telegram's queue, and the timestamp filter
+   discards it when a review next opens. The discarding is *correct* (a stray `확인` from yesterday
+   must never accept a draft the owner has not seen), but the silence makes the bot read as broken.
+   The fix is small — poll whenever the app is up, and reply "검토 중인 초안이 없습니다" — and it is
+   safe precisely because **the bot DM is not the capture channel**, so the Bot API's 24h retention
+   cannot cost a message. That unlocks the bigger question the owner actually posed: **should a
+   plain message to the bot DM *start* something?** That is the natural end of the "capture vs
+   conversation" split (Saved Messages = arrival, bot DM = conversation), and it is also what
+   replaces `#검토` for text once the prefix is deleted. **Note the ordering trap:** increment 5
+   deletes `#검토`, and if this is not built then text loses its interactive path entirely. That is
+   fine — the owner's stated model is that Saved Messages text is *always* a quick note — but it
+   should be a decision, not a side effect.
+
 ### Cost note — the budget is plan usage, not dollars
 
 A `claude -p` call carries ~9–14k cache-creation tokens (agent system prompt + tool definitions)
@@ -1202,4 +1290,4 @@ offset advance, the tick, transport errors). `ClaudeSessionLost` is covered in `
 against the fake-CLI subprocess, the two review templates in `test_prompts.py` (including the tilde
 rule, which is parametrized per template so a new one cannot forget it), the prefix dispatch in
 `test_router.py`, and the poller lifecycle + the HWM-advances-on-review rule in
-`test_client_service.py`. Suite: 341 → **454**.
+`test_client_service.py`. Suite: 341 → **474**.
