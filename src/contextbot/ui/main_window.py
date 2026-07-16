@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -23,6 +24,8 @@ from .status_widget import StatusWidget
 
 _HEALTH_INTERVAL_MS = 15_000
 _MAX_LOG_BLOCKS = 500
+# A floor only — the panel's real height is derived from the probes it is showing (_show_health).
+_HEALTH_MIN_HEIGHT = 96
 
 _STYLESHEET = """
 #root {
@@ -90,7 +93,13 @@ class MainWindow(QWidget):
         self.setObjectName("root")
         self.setWindowTitle("🤖 Context Bot")
         self.setStyleSheet(_STYLESHEET)
-        self.setMinimumSize(420, 620)
+        # Width only. A fixed minimum *height* (it was 620) is a promise about how much content
+        # there is, and increment 5 broke it by adding two probes: 620 is below what the layout
+        # needs, so Qt squeezed the cards past their own minimums and clipped the bottom of the
+        # health panel — `whisper-stt` and `glossary` gone, `claude-engine` cut off mid-path.
+        # Without it, the layout's own minimumSizeHint is the floor, so the window can never be
+        # smaller than the thing it has to show.
+        self.setMinimumWidth(420)
 
         # Status card (big friendly face).
         status_card, status_layout = _card("STATUS")
@@ -110,7 +119,19 @@ class MainWindow(QWidget):
         self._health_label.setObjectName("health")
         self._health_label.setFont(QFont("Menlo", 12))
         self._health_label.setWordWrap(True)
-        self._health_label.setMinimumHeight(96)  # room for the 4 probe lines
+        # The panel sizes itself to the probes, rather than to a number someone guessed once.
+        # It was a flat 96px — "room for the 4 probe lines" — and increment 5's two new probes
+        # (whisper-stt, glossary) fell off the bottom, invisible, while claude-engine was cut off
+        # mid-path. That is not cosmetic: the *whole point* of the whisper-stt probe is that the
+        # owner sees "model not downloaded" **before** they send a recording, and its message is the
+        # longest line the panel ever shows. A probe you cannot read is the failure it exists to
+        # prevent. A word-wrapped QLabel does not report its wrapped height to a layout unless
+        # height-for-width is enabled, so a long path silently ate the lines below it.
+        policy = self._health_label.sizePolicy()
+        policy.setVerticalPolicy(QSizePolicy.MinimumExpanding)
+        policy.setHeightForWidth(True)
+        self._health_label.setSizePolicy(policy)
+        self._health_label.setMinimumHeight(_HEALTH_MIN_HEIGHT)
         self._health_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         health_layout.addWidget(self._health_label)
 
@@ -135,7 +156,7 @@ class MainWindow(QWidget):
         # Wire worker signals.
         worker.status_changed.connect(self._on_status_changed)
         worker.log_line.connect(self._append_log)
-        worker.health_ready.connect(self._health_label.setText)
+        worker.health_ready.connect(self._show_health)
         worker.error.connect(self._on_error)
 
         # Periodic health polling while running.
@@ -155,6 +176,24 @@ class MainWindow(QWidget):
             self._health_timer.start()
         else:
             self._health_timer.stop()
+
+    def _show_health(self, text: str) -> None:
+        """Show the health report, and make the panel tall enough to actually show it.
+
+        The height is taken from the text rather than reserved in advance. It used to be a flat
+        96px — "room for the 4 probe lines" — and increment 5's two extra probes simply fell off
+        the bottom: `whisper-stt` and `glossary` invisible, `claude-engine` cut off mid-path. A
+        word-wrapped QLabel does not tell a layout how tall it needs to be, so a long path silently
+        ate the lines below it — and the probe whose entire job is to be *read before you send a
+        recording* was the one that vanished.
+
+        Deriving the height means the next probe cannot reintroduce this. A bigger constant would
+        only postpone it, which is exactly how the 96 got there.
+        """
+        label = self._health_label
+        label.setText(text)
+        width = label.width() or label.sizeHint().width()
+        label.setMinimumHeight(max(_HEALTH_MIN_HEIGHT, label.heightForWidth(width)))
 
     # ------------------------------------------------------------- UI actions
     def _on_toggle(self) -> None:

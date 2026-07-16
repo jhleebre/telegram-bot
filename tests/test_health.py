@@ -172,13 +172,15 @@ async def _report(settings):
     return await HealthChecker(client, FakeBot(), settings).check()
 
 
-async def test_stt_probe_reports_the_model_and_ffmpeg(settings):
+async def test_stt_probe_reports_the_model_and_the_resolved_ffmpeg(settings):
+    """The ffmpeg *path* is the point, not just that it exists: a Dock launch resolves a different
+    one, or none (the increment-1 bug, third appearance)."""
     report = await _report(settings)
 
     probe = report.probe("whisper-stt")
     assert probe.ok
-    assert settings.whisper_model in probe.detail
-    assert "ffmpeg" in probe.detail
+    assert "whisper-large-v3-turbo" in probe.detail  # the name, not the whole repo id
+    assert "/opt/homebrew/bin/ffmpeg" in probe.detail
 
 
 async def test_an_undownloaded_model_is_degraded_not_error(settings, monkeypatch):
@@ -236,4 +238,5 @@ async def test_a_present_glossary_is_reported(settings):
     probe = (await _report(settings)).probe("glossary")
 
     assert probe.ok
-    assert str(settings.glossary_path) in probe.detail
+    assert settings.glossary_path.name in probe.detail
+    assert str(settings.glossary_path.parent) in probe.detail

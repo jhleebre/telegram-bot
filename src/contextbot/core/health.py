@@ -118,19 +118,26 @@ def _whisper_stt(settings) -> ProbeResult:
         return ProbeResult(
             "whisper-stt", False, "mlx-whisper not installed — audio notes unavailable"
         )
+    # Kept short deliberately: this is the panel's longest line, and it is the one that most has to
+    # be *read*. The model id is in .env and the healthy line below; what the owner needs here is
+    # what to run.
     if not whisper.model_is_cached(settings.whisper_model):
         return ProbeResult(
             "whisper-stt",
             False,
-            f"model not downloaded ({settings.whisper_model}, {whisper.MODEL_SIZE_HINT}) — "
-            "run: .venv/bin/python scripts/download_model.py",
+            f"model not downloaded ({whisper.MODEL_SIZE_HINT}) — "
+            "run scripts/download_model.py",
         )
     ffmpeg = whisper.resolve_ffmpeg()
     if ffmpeg is None:
         # Resolved the increment-1 way, so this reports what a *Dock-launched* app would see —
         # which is the only launch that has ever hit this bug.
-        return ProbeResult("whisper-stt", False, "ffmpeg not found — install: brew install ffmpeg")
-    return ProbeResult("whisper-stt", True, f"{settings.whisper_model} · ffmpeg {ffmpeg}")
+        return ProbeResult("whisper-stt", False, "ffmpeg not found — run: brew install ffmpeg")
+    # The model's *name*, not the full repo id, and ffmpeg's resolved path — that path is the whole
+    # point (increment 1: a Dock launch finds a different one, or none).
+    return ProbeResult(
+        "whisper-stt", True, f"{settings.whisper_model.split('/')[-1]} · ffmpeg {ffmpeg}"
+    )
 
 
 def _glossary(settings) -> ProbeResult:
@@ -141,8 +148,8 @@ def _glossary(settings) -> ProbeResult:
     """
     path = settings.glossary_path
     if not path.is_file():
-        return ProbeResult("glossary", True, f"none at {path} — meeting notes skip term corrections")
-    return ProbeResult("glossary", True, f"{path} ({path.stat().st_size // 1024}KB)")
+        return ProbeResult("glossary", True, f"none at {path} — 회의록 용어 보정 없이 동작합니다")
+    return ProbeResult("glossary", True, f"{path.name} ({path.stat().st_size // 1024}KB) — {path.parent}")
 
 
 class HealthChecker:

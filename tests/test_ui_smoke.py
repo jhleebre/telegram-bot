@@ -96,3 +96,61 @@ def test_error_signal_resets_button(qtbot):
     worker.error.emit("bad token")
     assert "Start" in window._toggle_btn.text()
     assert "bad token" in window._log_view.toPlainText()
+
+
+def test_the_health_panel_shows_every_probe_it_is_given(qtbot):
+    """A probe you cannot read is the failure it exists to prevent.
+
+    The panel reserved a flat 96px — "room for the 4 probe lines" — and the window declared a fixed
+    minimum *height* of 620. Increment 5's two extra probes (whisper-stt, glossary) pushed the
+    content past both, so Qt squeezed the cards below their own minimums and clipped the bottom of
+    the health card: the two new probes were invisible and claude-engine was cut off mid-path.
+
+    That is not cosmetic. The whisper-stt probe's whole job is to say "model not downloaded"
+    **before** the owner sends a recording — and its message is the longest line the panel ever
+    shows, so it was the first to disappear. Exercised at the narrowest allowed width, which is the
+    worst case for wrapping.
+    """
+    from contextbot.core.health import HealthReport, HealthStatus, ProbeResult
+
+    worker = StubWorker()
+    window = MainWindow(worker)
+    qtbot.addWidget(window)
+    report = HealthReport(
+        overall=HealthStatus.DEGRADED,
+        probes=[
+            ProbeResult("telethon-auth", True, "authorized"),
+            ProbeResult("bot-token", True, "@my_context_bot"),
+            ProbeResult("inbox", True, "/Users/1111068/Documents/MarkNotes/0_inbox"),
+            ProbeResult("connection", True, "connected"),
+            ProbeResult("claude-engine", True, "/opt/homebrew/bin/claude (sonnet)"),
+            ProbeResult("whisper-stt", False, "model not downloaded (약 1.5GB) — run scripts/download_model.py"),
+            ProbeResult("glossary", True, "glossary.md (19KB) — /Users/1111068/Documents/MarkNotes/.claude/contextbot"),
+        ],
+    )
+    window.show()
+    worker.health_ready.emit(report.as_text())
+
+    # Shrink it the way dragging a corner would. It must refuse to go below what it has to show.
+    window.resize(window.minimumWidth(), 300)
+
+    label = window._health_label
+    needed = label.heightForWidth(label.width())
+    assert needed <= label.height(), (
+        f"the health panel is clipped: needs {needed}px, has {label.height()}px — "
+        "some probes are invisible"
+    )
+
+
+def test_the_window_has_no_fixed_minimum_height(qtbot):
+    """The layout owns its own floor.
+
+    A hardcoded minimum height is a promise about how much content there is, and adding a probe
+    breaks it silently — which is exactly how the panel above came to be clipped. Letting
+    minimumSizeHint be the floor means the next probe cannot reintroduce it.
+    """
+    window = MainWindow(StubWorker())
+    qtbot.addWidget(window)
+
+    assert window.minimumHeight() == 0, "a fixed minimum height lets the window clip its own content"
+    assert window.minimumWidth() > 0, "width still needs a floor — the text is monospaced paths"

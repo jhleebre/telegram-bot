@@ -14,7 +14,7 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > increments 2–3 use) → *Increment 4 (as built)* (the review state machine) → *The decisions,
 > settled* → *Increment 5 (as built)* (audio, the queue, and the two silent bugs only real runs
 > found).
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **577 passing**, no network or model runs.
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **579 passing**, no network or model runs.
 >
 > **Phase 2 is complete.** Every pipeline in *Scope* is shipped and owner-verified. The one thing
 > deliberately left open is **open decision 6** (should the bot DM answer when nobody asked it
@@ -1236,7 +1236,7 @@ Delivered: `stt/whisper.py` (the port) + `scripts/download_model.py`, `files/glo
 `handlers/audio_handler.py` (the producer), `engine/prompts/meeting_note.md` +
 `meeting_glossary.md`, the queue in `core/session_store.py` (`ReviewState.QUEUED`, `note_type`,
 `tags`), `conversation.activate` / `promote_next` / `_accept`, the `whisper-stt` and `glossary`
-health probes, five settings, and the **deletion of the `#검토` scaffolding**. Suite: 474 → **577**
+health probes, five settings, and the **deletion of the `#검토` scaffolding**. Suite: 474 → **579**
 (it peaked at 601 and *drops* here, because the scaffolding's ~28 tests went with their subject).
 
 **The decisions above all held.** What follows is what building it changed or found.
@@ -1298,9 +1298,9 @@ looks: the real correction run proved the revise turn *does* re-emit the `태그
 `split_tags` exists to catch. Had that been producer-only, the first correction to any meeting note
 would have written `태그: …` into the note body.
 
-#### Two more from reviewing this increment's own diff — the same trick increment 4 got three from
+#### Three more from reviewing the diff and looking at the app — the trick increment 4 got three from
 
-Neither is reachable from a test that was not written for it, and both are silent.
+None is reachable from a test that was not written for it, and all three are silent.
 
 1. **The promotion race, and it is entirely plausible.** A producer creates its entry `QUEUED` and
    *then* spends minutes drafting — so the queue also holds work **still in flight**. If the owner
@@ -1319,10 +1319,26 @@ Neither is reachable from a test that was not written for it, and both are silen
    confident, complete-looking note. The staging dir is now trusted **only** when the transcript is
    there beside the audio; anything else is wiped and re-fetched.
 
-Both are the increment's own machinery producing the failure it exists to prevent — which is what
-increment 4 said about its own three (*"silent strandings of exactly the kind the state machine
-exists to prevent, reintroduced by the machinery meant to prevent them"*). That is now **seven
-bugs across two increments** found by reading the diff rather than by running it. Budget for it.
+3. **The health panel clipped the probe that exists to be read.** Found by *screenshotting the real
+   window*, not by a test — the suite was green throughout. The panel reserved a flat 96px ("room
+   for the 4 probe lines") and the window declared `setMinimumSize(420, 620)`. Seven probes need
+   768px, and a fixed minimum *below* what the layout needs makes Qt squeeze the cards past their
+   own minimums and clip: **`whisper-stt` and `glossary` were invisible**, `claude-engine` cut off
+   mid-path. (A word-wrapped `QLabel` also never tells a layout how tall it is, so the long paths
+   ate the lines below them.) This is the worst one of the three, because the whisper-stt probe's
+   *entire purpose* is to say "model not downloaded" **before** the owner sends a recording — and
+   its message is the longest line the panel ever shows, so it was the first to vanish. **A probe
+   you cannot read is the failure it exists to prevent.** Fixed by deleting the promise rather than
+   raising it: the panel's height is derived from its text, and the window keeps only a minimum
+   *width* so the layout's own `minimumSizeHint` is the floor. A bigger constant would just postpone
+   it — which is precisely how the 96 got there.
+
+All three are the increment's own machinery producing the failure it exists to prevent — which is
+what increment 4 said about its own three (*"silent strandings of exactly the kind the state machine
+exists to prevent, reintroduced by the machinery meant to prevent them"*). That is now **eight bugs
+across two increments** found by reading the diff or looking at the app, rather than by running the
+suite. Budget for it. **And note what caught the third: a screenshot.** Every probe added to
+`health.py` is a line in a fixed-size panel, and nothing in the suite had ever looked at it.
 
 #### Points worth knowing before touching this
 
@@ -1583,8 +1599,9 @@ transcript cache proving Whisper runs once across a deferral and its replay, eve
 landing on a transcript note, and the queue). `test_conversation.py` gains the queue, `split_tags`,
 `strip_preamble`/`strip_trailing_rule` (both from real runs), and what accepting a meeting now
 means; `test_client_service.py` the promotion wiring; `test_health.py` the `whisper-stt` and
-`glossary` probes. **`mlx_whisper` is faked at the import site and `conftest.fake_stt` is required
+`glossary` probes, and `test_ui_smoke.py` the health panel's height (the one bug a screenshot
+caught and the suite could not). **`mlx_whisper` is faked at the import site and `conftest.fake_stt` is required
 by any test that routes audio** — without it a test that merely proves *dispatch* would load 1.5GB
 of weights, and the `whisper-stt` probe is pinned so a green suite never means "the owner happens to
-have the model on disk". Suite: 474 → 601, then **577** once the `#검토` tests were deleted with their
-subject (573) and the two self-review bugs were covered.
+have the model on disk". Suite: 474 → 601, then **579** once the `#검토` tests were deleted with
+their subject (573) and the self-review bugs were covered.
