@@ -34,10 +34,19 @@ client can read Saved Messages history, which removes the 24h limit entirely.
     Markdown note; **`.txt`/`.csv`** become notes too (CSV tables are rendered exactly, never
     retyped by a model), and a **`.md`** file is saved as-is. Originals are filed to
     `~/Downloads/`. Anything else (docx/pptx/xlsx) gets a reply asking for a PDF export.
-  - ⬜ 3. images → described notes · ⬜ 4. human-in-the-loop review plumbing ·
-    ⬜ 5. audio → meeting notes
+  - ✅ **3. Image → described note** — send a screenshot or photo and it becomes a note with the
+    image **embedded in it** (base64) above a Claude-generated description and a verbatim
+    transcription of any text in it. `heic`/`bmp` are converted first, because neither the model
+    nor the vault can render them. A failure still saves the image, with the reason in place of the
+    description — the capture is never lost.
+  - ✅ **4. Human-in-the-loop review** — send `#검토 <메모>` and the bot drafts a note, then asks you
+    about anything it had to guess. Reply in the bot DM: `확인` saves it, `취소` drops it, and
+    anything else is applied and shown to you again. Built on resumable Claude Code sessions, so
+    each turn keeps full context, and a review **survives closing the app**. If it can't be
+    finished, the draft is saved anyway and marked unreviewed — a review never ends empty-handed.
+  - ⬜ 5. audio → meeting notes
 
-  Audio and images still reply "Phase 2 예정". See [docs/PHASE2.md](docs/PHASE2.md).
+  Audio still replies "Phase 2 예정". See [docs/PHASE2.md](docs/PHASE2.md).
 
   **Documents are PDF-only by design.** Export from Word/PowerPoint to PDF and send that — Claude
   Code reads PDFs natively, so the bot needs no converter, no extra dependency, and never has to

@@ -173,3 +173,22 @@ def test_invalid_claude_timeout(tmp_path, raw):
     env["CLAUDE_TIMEOUT_SEC"] = raw
     with pytest.raises(ConfigError, match="CLAUDE_TIMEOUT_SEC"):
         Settings.load(env, use_dotenv=False)
+
+
+def test_review_expiry_defaults_to_the_bot_apis_retention_window(tmp_path):
+    """24h is not a taste call: past it, Telegram drops a reply sent while the app was closed, so
+    the review could never be finished anyway."""
+    assert Settings.load(_base_env(tmp_path), use_dotenv=False).review_expiry_hours == 24.0
+
+
+def test_review_expiry_override(tmp_path):
+    env = _base_env(tmp_path) | {"REVIEW_EXPIRY_HOURS": "2.5"}
+    assert Settings.load(env, use_dotenv=False).review_expiry_hours == 2.5
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-1"])
+def test_invalid_review_expiry(tmp_path, raw):
+    env = _base_env(tmp_path)
+    env["REVIEW_EXPIRY_HOURS"] = raw
+    with pytest.raises(ConfigError, match="REVIEW_EXPIRY_HOURS"):
+        Settings.load(env, use_dotenv=False)

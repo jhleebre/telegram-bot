@@ -1,4 +1,4 @@
-# Phase 2 — Development Plan (increments 1–3 of 5 shipped)
+# Phase 2 — Development Plan (increments 1–4 of 5 shipped)
 
 Phase 2 adds the LLM/VLM-powered pipelines on top of the Phase 1 skeleton. The engine is
 **Claude Code in headless mode** (`claude -p`), and multi-turn human-in-the-loop review is built
@@ -10,9 +10,10 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > *Increment 2 (as built)* (the file pipelines and the isolation the PDF route depends on) →
 > *Increment 3 (as built)* (images, and the format finding that route turns on) →
 > *Usage-limit policy* (binding on every later increment) → *Writing Markdown: ranges take a
-> hyphen* (binding on every prompt) → *Next up: increment 4* (**read its measured resume contract
-> before designing anything** — it rules out the staging pattern increments 2–3 use).
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **337 passing**, no network or model runs.
+> hyphen* (binding on every prompt) → *The resume contract* (measured; it rules out the staging
+> pattern increments 2–3 use) → *Increment 4 (as built)* (the review state machine increment 5
+> builds on, and the rules that hold it together) → *Next up: increment 5*.
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **454 passing**, no network or model runs.
 
 **Ingestion recap (from the Phase 1 hybrid):** input files arrive via **Saved Messages** (Telethon)
 and are downloaded to a temp dir with `message.download_media(...)`. The **review conversation runs
@@ -42,11 +43,11 @@ Recommended order (each is a self-contained milestone — ship and verify before
       converter, no new dependency. **Shipped and owner-verified** — see "Increment 2 (as built)".
 - [x] **3. Image → described note** (`image_handler`, VLM via `claude -p`) — still no review loop.
       **Shipped and owner-verified** — see "Increment 3 (as built)" below.
-- [ ] **4. Human-in-the-loop plumbing** (`core/session_store.py`, `handlers/conversation.py`, bot-DM
-      polling) — build and test the review state machine on a simple case first.
-      **Next up** — the handoff is "Next up: increment 4" below.
+- [x] **4. Human-in-the-loop plumbing** (`core/session_store.py`, `handlers/conversation.py`,
+      `core/review_poller.py`) — the review state machine, built and verified on a simple case
+      (`#검토 <memo>`) rather than wired into audio. **Shipped** — see "Increment 4 (as built)".
 - [ ] **5. Audio → meeting note** (`audio_handler`, `mlx-whisper`, glossary, review) — the most
-      complex; depends on 1 and 4.
+      complex; depends on 1 and 4. **Next up** — the handoff is "Next up: increment 5" below.
 
 Rationale: features 2–3 are one-shot and low-risk, so they validate the engine (1) before the
 harder two-way review flow (4) and the STT-heavy audio pipeline (5) are attempted.
@@ -249,6 +250,7 @@ document's own title, `##`/`###` structure, and rendered tables, faithfully.
 | txt / csv | ✅ **shipped** — Markdown note (csv → table, rendered deterministically) → `0_inbox` | **moved to `~/Downloads/`** |
 | Markdown (`.md`) | ✅ **shipped** — saved as-is → `0_inbox` | is the note |
 | Text (upgrade) | ✅ **shipped** — LLM-enriched title/tags/summary (fallback = Phase 1 path) | — |
+| **Text `#검토 …`** | ✅ **shipped (increment 4)** — drafted, reviewed over bot DM, then → `0_inbox`. The review loop's proving ground; opt-in, so a plain memo is unaffected | — |
 
 ## New modules
 
@@ -257,15 +259,17 @@ src/contextbot/
 ├── engine/                 # ✅ built in increment 1
 │   ├── claude_cli.py       # wrapper over `claude -p` (async subprocess, JSON parse, resolution)
 │   ├── parsing.py          # recover a JSON object from a model's free-text reply
-│   └── prompts/            # templates: text_enrich ✅ / pdf_to_markdown ✅ / image_describe ✅ / meeting
+│   └── prompts/            # text_enrich ✅ / pdf_to_markdown ✅ / image_describe ✅
+│                           # review_draft ✅ / review_revise ✅ (increment 4) / meeting
 ├── core/
-│   └── session_store.py    # per-chat conversation state + Claude session_id persistence
+│   ├── session_store.py    # ✅ increment 4 — the pending review: draft, resume handle, work dir
+│   └── review_poller.py    # ✅ increment 4 — bot-DM getUpdates, only while a review is open
 ├── handlers/
 │   ├── audio_handler.py    # (fill in) audio → meeting note
 │   ├── image_handler.py    # ✅ built in increment 3 — image → described note
 │   ├── document_handler.py # ✅ built in increment 2 — md / txt / csv / pdf / unsupported
 │   ├── downloads.py        # ✅ built in increment 3 — shared attachment download (audio is next)
-│   └── conversation.py     # routes a plain-text reply into an active pending session
+│   └── conversation.py     # ✅ increment 4 — the whole review lifecycle: start, reply, end
 └── files/                  # ✅ built in increments 2–3
     ├── originals.py        # original-file policy (Downloads / delete / keep-and-embed)
     ├── images.py           # ✅ increment 3 — heic/bmp → PNG, so the model actually *sees* it
@@ -468,7 +472,7 @@ failure, and text is the only one with a real no-LLM path:
 | Document (2) | ✅ **decided when built, and it splits.** `.txt`/`.csv` degrade like text (the body is the file, so only frontmatter weakens). `.pdf` has **no fallback** — the LLM *is* the converter — so: no note, reply with the reason, original still filed to `~/Downloads` |
 | Image (3) | ✅ **decided when built: save the image + a stub note that embeds it.** No fallback exists for the description — but unlike a PDF, the image *is* the capture and is worth keeping regardless, so the note is always written and always embeds it, with the reason in place of the description |
 | Audio (5) | **No fallback.** STT is local, so the transcript survives — but the meeting note does not. Saving the raw transcript beats losing the recording. |
-| Review (4) | A failure mid-review would strand a session in `AWAITING_REVIEW`. The state machine must handle "cannot resume right now" without dropping the draft. |
+| Review (4) | ✅ **decided when built: the review always ends by delivering its draft.** A lost session, a review that cannot make progress, and an expiry all write the draft as a note marked unreviewed. A *recoverable* failure (usage limit, engine hiccup) keeps the review open instead — the transcript is on disk, so the owner just retries. Only `취소` discards. See "The open question — settled" |
 
 **Replay cost (increment 5).** A deferred message re-runs its handler *from the start* — for audio
 that means re-downloading and re-running Whisper (minutes). Either cache the transcript keyed by
@@ -517,6 +521,11 @@ deferral-leaves-no-side-effect), `test_images.py` (format policy + real `sips` c
 of the note**, which is the only thing that proves the capture survived. Suite: 270 → **337**.
 
 ## Human-in-the-loop via session preservation
+
+> ✅ **Shipped in increment 4** — this section is the design sketch that went in; *Increment 4 (as
+> built)* is what came out, and it is the authority where the two differ (notably: the store's JSON
+> file is authoritative rather than an in-memory dict, polling lives in its own
+> `core/review_poller.py`, and every involuntary end **delivers** the draft rather than dropping it).
 
 `core/session_store.py` + `handlers/conversation.py` implement a per-review state machine:
 
@@ -717,22 +726,9 @@ third):
    header. Both returned `is_error: False` with plausible output. **Assume the model would rather
    answer than admit it cannot see**, and design so it never gets the chance.
 
-### Next up: increment 4 — human-in-the-loop review plumbing
+### The resume contract — measured against the real CLI, and it constrains the design
 
-**Status: not started.** Increments 1–3 are shipped. Increment 4 is the first one that is *not*
-one-shot, and increment 5 (audio) depends on it.
-
-Scope: `core/session_store.py`, `handlers/conversation.py`, and bot-DM `getUpdates` polling — see
-*Human-in-the-loop via session preservation* above for the state machine and the channel split
-(capture in Saved Messages, review in the bot DM, so a review reply is never re-ingested).
-
-**Build and test it on a simple case first** (the delivery approach's advice, and increments 1–3
-bear it out: each one's real surprise came from the real app, not the design). Do **not** wire it
-into the audio pipeline in the same increment.
-
-#### The resume contract — measured against the real CLI, and it constrains the design
-
-**Read this before designing anything.** `--resume` is what the whole increment stands on, and it
+**Read this before touching the review loop.** `--resume` is what increment 4 stands on, and it
 does not behave the way increments 2–3's staging pattern assumes. Probed against CLI v2.1.187:
 
 | # | Situation | Result |
@@ -743,6 +739,10 @@ does not behave the way increments 2–3's staging pattern assumes. Probed again
 | 4 | Resume after **recreating the same path** | ✅ works — lookup is by path *string* |
 | 5 | Resume in a **new process** | ✅ works (transcript is on disk) |
 | 6 | `--session-id <uuid>` to **pin** the id | ✅ honoured; resumable by that id |
+| 7 | Resume **twice** (turns 2 and 3) | ✅ **the id does not fork** — the same id comes back |
+
+*(Row 7 was measured while building increment 4, and it is why the resume handle is written down
+once and never refreshed: `ClaudeResult.session_id` on a resumed turn is the id you passed in.)*
 
 **The transcript lives in `~/.claude/projects/<slugified-cwd>/<session-id>.jsonl`.** Sessions are
 therefore scoped to the **working directory path**, and that is the trap:
@@ -760,12 +760,14 @@ app restart, which is exactly what the on-disk state store is for. Row 6 is bett
 session id yourself**, and the state store can record a resumable handle *before* the call, so a
 crash mid-call still leaves something to resume rather than an orphan.
 
-**One failure mode to type.** A lost session surfaces today as a bare
+**One failure mode, now typed.** A lost session surfaced as a bare
 `ClaudeError: claude exited 1: No conversation found with session ID: …` — the CLI prints that as
-**non-JSON**, so `run()` falls through to its exit-code branch (verified). Increment 4 should
-detect it (a `ClaudeSessionLost`, alongside `ClaudeUsageLimit`) so the state machine can tell "this
-review is unrecoverable, hand the owner the draft" apart from "the engine is briefly unhappy".
-**Never let it strand a draft.**
+**non-JSON**, so `run()` fell through to its exit-code branch. Increment 4 typed it as
+**`ClaudeSessionLost`** (a `ClaudeError`, so existing callers still degrade), which is what lets the
+state machine tell "this review is unrecoverable, hand the owner the draft" apart from "the engine
+is briefly unhappy". Re-measured while building it, and the precise shape matters to the detection:
+**exit 1, stdout empty, the message on _stderr_** — so it is matched there, lowercased, on
+`no conversation found` alone.
 
 **What increments 1–3 leave you (do not re-invent):**
 
@@ -788,15 +790,251 @@ review is unrecoverable, hand the owner the draft" apart from "the engine is bri
   the note until the owner accepts it, and the usage limit can now land on turn 2 rather than
   turn 1.
 
-**The open question (still open — settle it first and record the answer here).** A failure mid-review
-strands a session in `AWAITING_REVIEW`. `DeferMessage` is *not* obviously right: the handler already
-ran, so a replay re-runs the whole job (for audio, that is Whisper again — minutes). Note the
-asymmetry the measurements above create — a **usage limit** on turn 2 is survivable (the session is
-on disk and resumes after the window resets, per row 5), but a **lost session** is not (nothing to
-resume). Those two probably want different answers.
+### Increment 4 (as built) — human-in-the-loop review plumbing
 
-**Verification bar (same as increments 2–3):** unit tests with a mocked engine (no model runs), the
-whole suite green, then a real-app run. **Stop for owner confirmation before increment 5.**
+Delivered: `core/session_store.py` (the pending review), `core/review_poller.py` (bot-DM polling —
+**a module the sketch above did not name**, because the split from `Notifier` earns its own file),
+`handlers/conversation.py` (the whole review lifecycle), `engine/prompts/review_draft.md` +
+`review_revise.md`, `ClaudeSessionLost`, the `REVIEW_EXPIRY_HOURS` setting, and the `ClientService`
+wiring. Suite: 341 → **454**.
+
+**The simple case it was built and verified on is `#검토 <memo>`** — the delivery approach's advice,
+followed literally: no Whisper, no download, no staging, but the same multi-turn resume contract
+end-to-end. **The audio pipeline is untouched.** A plain memo still takes the shipped one-shot path;
+the review route is opt-in by prefix, dispatched in `route()` rather than inside `handle_text`, so
+the two handlers stay independent of each other.
+
+#### The open question — **settled: a review always ends by delivering its draft**
+
+*(This was the "settle it first" item. Recorded here before any code was written; the "Increment 4
+(as built)" section below is what came of it.)*
+
+A failure mid-review strands a session in `AWAITING_REVIEW`. The answer starts by rejecting
+`DeferMessage` outright — **not** as a judgement call, but because it does not typecheck against a
+review turn:
+
+- **There is no handler on the stack to replay.** The capture handler returned the moment it posted
+  the review question. Turn 2 is driven by the *poller*, not by `_process`, so raising `DeferMessage`
+  there would propagate out of a background task, not into the catch-up loop that knows what to do
+  with it.
+- **Even if it did, replay is the wrong operation.** It re-runs the whole job from scratch (for
+  audio: Whisper again, minutes) to regenerate a draft **that already exists on disk**.
+- **And halting is actively harmful here.** `_halt` stops the client — which stops the poller — so a
+  review that halted itself could never receive the reply that would finish it. Deadlock.
+
+So: **`DeferMessage` is for capture only. A review turn never raises it.** The asymmetry the
+measurements create then splits the remaining cases cleanly, and they land on two answers, not one:
+
+| Mid-review failure | Session on disk? | Answer |
+|--------------------|------------------|--------|
+| **Usage limit** (turn 2) | ✅ yes (row 5) | **Stay in `AWAITING_REVIEW`.** Tell the owner, keep polling, let them re-send their reply after the window resets. Nothing is lost and nothing is written. |
+| Transient engine error (timeout, CLI hiccup) | ✅ yes | Same — stay, report, let the owner retry. Bounded (below). |
+| **`ClaudeSessionLost`** | ❌ **nothing to resume** | **Deliver the draft** as an unreviewed note and end the review. |
+| N consecutive failures on one review | probably not | **Deliver the draft** and end — the give-up that stops "stay and retry" from stranding forever. |
+| Review expiry (owner never replied) | ✅ but moot | **Deliver the draft** and end. |
+
+**The unifying rule: a review never ends empty-handed.** Three of those five rows converge on the
+same exit, which is the whole answer to *"never let it strand a draft"* — an unrecoverable review
+ends by **giving the owner the draft**, not by discarding it. Only the *reviewed* quality is lost,
+never the work. This is increment 3's decision 1 (an image without its description is still the
+image) applied one level up: **a draft without its review is still a draft**, and it is the expensive
+artifact — a Whisper run plus an LLM pass. The PDF route's "no note at all" reasoning does not
+transfer, because a PDF without its conversion is genuinely nothing, whereas a draft is content.
+Delivered drafts are marked, so an unreviewed note can never be mistaken for an accepted one.
+
+**Why a usage limit does *not* halt the bot** (the one place this departs from the usage-limit
+policy's reflex): the limit is real, so the *capture* path will hit it on its very next message and
+halt through the existing route. Halting from the review turn adds nothing and costs the poller —
+i.e. the owner's ability to retry. The policy's table is unchanged; it just never applied here,
+because a review turn is not a capture.
+
+**Two consequences worth stating plainly, because they are easy to get backwards:**
+
+- **The HWM advances when the review is *recorded*, not when the note is written.** A review-bearing
+  job is "processed" once its draft and resume handle are durably on disk — from there the *store*
+  owns the review's lifetime, not the watermark. The alternative (hold the HWM until the owner
+  accepts) is wrong twice over: catch-up breaks at the first unadvanced message, so an unanswered
+  review would block every later capture while the owner takes an hour to reply, and a restart would
+  re-run the whole job on top of a perfectly good draft. The HWM means *ingested*, and always did.
+- **`취소` is the one case that discards.** The intent is unambiguous and the loss is recoverable:
+  Saved Messages is the durable input, so the owner re-sends. Every *involuntary* end delivers.
+
+#### As built
+
+The state machine, and every edge out of it:
+
+| From | On | To |
+|------|----|----|
+| IDLE | `#검토 <memo>` → draft + questions | **AWAITING_REVIEW** |
+| AWAITING_REVIEW | `확인` / `ok` / `네` / `저장` | note written (`reviewed: true`) → IDLE |
+| AWAITING_REVIEW | `취소` | **draft discarded** → IDLE (the only discard) |
+| AWAITING_REVIEW | anything else | FINALIZING → resume → new draft → **AWAITING_REVIEW** (loop) |
+| AWAITING_REVIEW | usage limit / engine hiccup | stays **AWAITING_REVIEW** — retry by re-sending |
+| AWAITING_REVIEW | `ClaudeSessionLost` / 3 consecutive failures / 24h expiry | draft delivered (`reviewed: false`) → IDLE |
+| *(crash during turn 1)* | next start: `discard_incomplete` | IDLE — the memo replays, HWM never advanced |
+| *(crash during a later turn)* | next start: `discard_incomplete` clears the stale FINALIZING | **AWAITING_REVIEW** — the draft is intact |
+
+A usage limit does **not** count toward the 3-failure give-up: the engine is not broken, the
+allowance is spent, and counting it would abandon a healthy review after three retries inside one
+limit window. Expiry is the backstop that keeps "stay and retry" from waiting forever.
+
+Points worth knowing before touching this:
+
+- **The work dir is `state/reviews/<message_id>/work/`, and the draft is one level *above* it.**
+  Both halves matter. The dir is the session's cwd (so it must outlive the turn — the whole reason
+  the `TemporaryDirectory` pattern is banned here), *and* it is the model's view of the filesystem
+  (so increment 2–3's isolation rule still binds). Keeping the draft outside it is what lets both be
+  true at once: `test_the_work_dir_is_empty_so_the_isolation_rule_still_holds` asserts the listing.
+  For `#검토` the dir is simply empty — which is the strongest isolation available. **Increment 5
+  stages the audio/transcript there, alone.**
+- **The session id is pinned and recorded *before* the first call** (row 6), and written once —
+  resuming does not fork it (row 7).
+- **Three ways turn 1 can end, and they need three different unwinds** — this is where building it
+  corrected the design:
+  - **`DeferMessage` (usage limit) → remove the entry.** The replay re-runs the handler from
+    scratch, so a review left behind would bounce that replay off the one-at-a-time guard and
+    answer the memo with "이미 검토 중" forever.
+  - **Any other exception → remove the entry and re-raise.** We are still alive, so we can unwind;
+    leaking here would block every later review on a draft that does not exist.
+  - **A crash → nothing runs, so `discard_incomplete` clears it at the next start.** The signal is
+    the draft *file*, which only a completed turn creates.
+- **What pinning the id early actually buys is narrower than it first looks — and the honest
+  version matters.** The sketch said it means "a crash mid-call leaves something to resume". It
+  does, but **resuming it is not useful**: there is no draft, and the owner was never asked
+  anything. The real recovery is simpler and already correct — `_process` advances the HWM only
+  *after* the handler returns, so a crash during turn 1 leaves the memo unprocessed and catch-up
+  replays it. What pinning genuinely buys is that the handle is always *knowable*, so the entry can
+  be cleaned up deterministically instead of leaking, and so turns 2+ have a handle that was never
+  in doubt.
+- **`SessionStore`'s JSON file is the authority, not an in-memory dict.** The capture handler and
+  `ClientService` each hold their own store over the same path; if either cached, one could open a
+  review the other could not see, and the client would never start polling. Every operation loads,
+  mutates, and atomically writes. (This is a deliberate departure from the "in-memory + on-disk"
+  sketch above — the file is tiny and touched at human speed, so the cache buys nothing and costs a
+  coherence bug.) The client asks the *store* whether a review is open rather than reading it off a
+  `HandlerResult`, so handlers need no new channel to announce one.
+- **At most one review at a time**, enforced in the store. With two open, a bare `확인` in the bot DM
+  is unattributable, and guessing would silently apply the owner's answer to the wrong draft. A
+  second `#검토` replies "먼저 끝내주세요" and advances — *not* `DeferMessage`, which would halt the
+  bot, stop the poller, and leave the open review permanently unanswerable. **This is the constraint
+  increment 5 has to revisit** (below).
+- **The poller filters on two things, and the second is the one that matters.** Long polling returns
+  whatever Telegram retained (24h), so a reply is accepted only if it is from the owner's DM **and
+  sent after the review began**. Without the timestamp check, a message the owner typed at the bot
+  *before* the review would be read as their answer to a question they had not yet been asked. The
+  cutoff is the **review's** start, not the poller's — otherwise a restart would silently discard an
+  answer sent while the app was closed.
+- **The review block is bounded as a *whole*, and the draft is what yields.** Telegram rejects a
+  message over 4096 chars and `Notifier` *swallows* the rejection (it must never let a failed reply
+  break processing), so an oversized block is one the owner never sees while the store waits for
+  their answer — an unanswerable review, silently. Budgeting only the draft leaves the total
+  unbounded, since the title, the questions, and the footer ride along; the questions are kept whole
+  (they are what the owner must answer) and the draft gives up the room, because the draft is the
+  part they can read in the note.
+- **`FINALIZING` must not outlive the process that set it.** It guards against two CLI processes
+  resuming one transcript, but it is persisted — so a crash mid-turn left it set forever, and every
+  later reply (**including `확인` and `취소`**) was answered "잠시 후 다시 보내주세요" until the 24h
+  expiry. The owner could not rescue their own draft. `discard_incomplete` clears it: no turn can be
+  in flight in a fresh process.
+- **`review.write_draft` replaces the draft wholesale each turn**, which is why `review_revise.md`
+  insists on the complete note rather than a diff. The safety net is structural rather than a
+  guard: **every revision is shown to the owner before it can become a note**, so a truncated one is
+  visible, not silent.
+- **The sentinel is `DRAFT_FAILED`**, first-line-matched, with the same `< 20` chars short-stub
+  guard the PDF and image routes use, for the same reason.
+- **A failure at turn 1 never loses the memo**: no draft is possible, so the memo is saved as an
+  ordinary note with the reason in the reply. `CLAUDE_ENABLED=false` takes the same path.
+- **`확인!` is `확인`.** Accept/cancel matching strips trailing punctuation, because without it the
+  reply falls through to a *revision* — spending a full LLM turn rewriting the note against the
+  "instruction" `확인!`, at the exact moment the owner thought they were done.
+
+*(The three bullets above came out of a review of this increment's own diff, not the design. Two of
+them — the unbounded block and the immortal `FINALIZING` — were silent strandings of exactly the
+kind the state machine exists to prevent, reintroduced by the machinery meant to prevent them.)*
+
+**The third trap did not materialize — and that is worth recording.** Increments 2 and 3 each hit
+the same shape (the model answers plausibly rather than admitting it cannot see, `is_error: false`),
+and increment 4 was expected to hit a third. The natural candidate was real: if `--resume` were to
+*silently start a fresh session*, the model would produce a confident "revision" from the reply
+alone, with nothing to reveal that the draft it claims to be revising was never in its context.
+**Measured: it does not.** A lost session fails loudly (exit 1, `No conversation found`), which is
+what made typing it possible at all. The trap's absence here is a property of the CLI, not of our
+care — so the assumption stays for increment 5.
+
+**Verification status.** Driven for real, end-to-end through `handle_review_request` /
+`handle_reply` against the real `claude` binary, on a Korean memo:
+
+- **The full loop works**: draft (title + 4 questions) → correction ("담당자는 김철수 책임, 기한은
+  7월 24일, 캐시 서버 건은 보류가 아니라 취소") → resume applied all three, **dropped the questions it
+  had answered, kept the ones still open** → `확인` → note written with `reviewed: true`.
+- **The tilde rule survives the hermetic flags.** The memo deliberately carried two ranges written
+  the Korean way (`20~30%`, `10~15%`) — both came back as `20-30%` / `10-15%`. The rule reached the
+  model through the prompt template, which is the only route it has (`CLAUDE.md` never gets there).
+- **The session-lost path was driven for real**, not simulated: the transcript was located by
+  session id under `~/.claude/projects/` and deleted, then the owner's reply resumed into a dead
+  session. `ClaudeSessionLost` was raised from the real stderr, the draft was delivered with
+  `reviewed: false` and its banner, and the review closed. *(Deleting the work dir alone is **not**
+  enough to test this — row 4: the lookup is by path string, so anything that recreates the path
+  restores resumability. The first attempt at this probe proved only that.)*
+- **Turn 1's deferral was verified against a real exhausted limit**, not an injected 429 — the
+  probing itself spent the 5-hour allowance, which is the usage-limit policy's own point about
+  sharing the pool. `handle_review_request` raised `DeferMessage`, and the store was left with
+  `{"reviews": []}` and no note: **the unwind ran on the real path**, so the replay will meet a
+  clean guard rather than "이미 검토 중".
+
+*(The three review fixes above landed after those runs. All three are pure string/state logic with
+no engine call in them — the turn-1/turn-2 engine interaction is byte-for-byte what was driven — and
+each is unit-covered.)*
+
+**Owner verification: pending.** The bot-DM poller is the one part no unit test can prove, since it
+is the real Bot API's behaviour. Everything else above ran for real.
+
+### Next up: increment 5 — audio → meeting note
+
+**Status: not started.** It is the last one, the most complex, and the only one that depends on two
+prior increments (1 and 4).
+
+Scope: `handlers/audio_handler.py`, `mlx-whisper` STT, the shared glossary, and the review loop —
+see *A. Audio → meeting note* above for the pipeline, and *Increment 4 (as built)* for the state
+machine it plugs into.
+
+**What increment 4 leaves you (do not re-invent):**
+
+- **`conversation.start`-shaped work is already done.** `handle_review_request` is the *producer*
+  pattern to copy: pin a session id → `store.create(...)` **before** the call → run turn 1 with
+  `cwd`/`add_dirs` = `review.work_dir` → `review.write_draft(body)` → `store.update(review)` →
+  return the review block as the reply. Everything after that — the poller, `handle_reply`, revise,
+  accept, cancel, expiry, delivery — is shared and needs nothing from audio.
+- **Stage the audio and the transcript in `review.work_dir`, alone.** It already exists, it is
+  already the cwd, and it is already empty. The glossary is the one exception: it is read-only
+  context from *outside*, so it is a second `--add-dir`, never a copy into the work dir.
+- **`handlers/downloads.download_attachment`** is the shared download helper — audio is its third
+  caller, as increment 3 predicted.
+- **`mlx-whisper` and `ffmpeg` will hit the launchd-PATH wall** that `claude` hit (increment 1).
+  Resolve them like `resolve_executable` does; do not assume PATH.
+
+**The decisions increment 5 has to make (each one is genuinely open):**
+
+1. **One review at a time is going to hurt here, and this is where it gets designed.** A `#검토`
+   memo bouncing off "먼저 끝내주세요" costs a re-send. **An audio file bouncing off it costs a
+   re-upload of a large recording, and the whole Whisper run.** The constraint exists because a bare
+   `확인` cannot be attributed across two open reviews — so the fix is *not* "allow two", it is to
+   decide between a **queue** (capture drafts it, holds it, asks when the current review ends) and
+   **addressing** (each review block carries a handle the reply must name). Note the queue defers
+   the *asking*, not the job — the transcript is already made, so nothing expensive is repeated.
+2. **The replay cost, now unavoidable.** A usage limit on turn 1 raises `DeferMessage`, and the
+   replay re-runs the handler from scratch — for audio that is Whisper again, minutes. Either cache
+   the transcript keyed by message id, or accept the rework. Increment 4 makes one thing easier:
+   turn 1 is the *only* place `DeferMessage` can fire, because a review turn never raises it.
+3. **The glossary's git commit/push** (open decision 2) and **sharing vs copying the glossary file**
+   (open decision 5) — both still open, both increment 5's.
+4. **The audio's own side effects.** The original is deleted on success — and "success" now means
+   *the owner accepted the note*, not *the draft was made*. That is turns apart from the handler
+   that downloaded it, and `deliver_draft` can end a review from a background task. Whatever holds
+   the audio must be reachable from there, or the deletion has to be given up on deliberately.
+
+**Verification bar (same as increments 2–4):** unit tests with a mocked engine and mocked STT (no
+model runs, no model downloads, no network), the whole suite green, then a real-app run.
 
 ## C. PDF → Markdown
 
@@ -875,3 +1113,15 @@ Mock `engine/claude_cli.py` and the STT step so the conversation state machine, 
 resume/finalize, glossary update, original-file moves, and file output are all testable without
 real model runs, model downloads, or network. Add fixtures for pending-session persistence and
 timeout/`취소` handling.
+
+Increment 4 adds `test_conversation.py` (the state machine: the draft turn, the resume turn, accept
+/ cancel / revise, and **every failure edge** — a usage limit on turn 1 deferring *and leaving no
+review behind*, a usage limit on turn 2 keeping the review alive, a lost session delivering the
+draft, the give-up counter, expiry), `test_session_store.py` (the work-dir isolation, the file as
+authority across two store instances, restart survival, `created_at` vs `source_date`), and
+`test_review_poller.py` (the owner filter, **the backlog filter and the restart case it protects**,
+offset advance, the tick, transport errors). `ClaudeSessionLost` is covered in `test_claude_cli.py`
+against the fake-CLI subprocess, the two review templates in `test_prompts.py` (including the tilde
+rule, which is parametrized per template so a new one cannot forget it), the prefix dispatch in
+`test_router.py`, and the poller lifecycle + the HWM-advances-on-review rule in
+`test_client_service.py`. Suite: 341 → **454**.

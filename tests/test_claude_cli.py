@@ -14,6 +14,7 @@ from contextbot.engine import claude_cli
 from contextbot.engine.claude_cli import (
     ClaudeCLI,
     ClaudeError,
+    ClaudeSessionLost,
     ClaudeTimeout,
     ClaudeUnavailable,
     ClaudeUsageLimit,
@@ -197,6 +198,43 @@ async def test_nonzero_exit_with_empty_stderr_and_no_json(make_claude):
     script = make_claude("code = 1")
     with pytest.raises(ClaudeError, match="exited 1"):
         await _cli(script).run("hi")
+
+
+# --------------------------------------------------------------- a lost session
+# Measured against the real CLI (v2.1.187), resuming an unknown session id:
+#   exit 1, stdout **empty**, stderr "No conversation found with session ID: <uuid>"
+# So it arrives through the exit-code branch, not the JSON one — which is why it needs typing here
+# rather than in _error_from. The review state machine must tell "unrecoverable, hand over the
+# draft" apart from "the engine is briefly unhappy", and an untyped ClaudeError cannot.
+_SESSION_LOST_STDERR = "No conversation found with session ID: 0000-1111"
+
+
+async def test_lost_session_is_typed(make_claude):
+    script = make_claude(f"sys.stderr.write({_SESSION_LOST_STDERR!r})\ncode = 1")
+    with pytest.raises(ClaudeSessionLost, match="No conversation found"):
+        await _cli(script).run("hi", resume="0000-1111")
+
+
+async def test_lost_session_is_still_a_claude_error(make_claude):
+    """Subclassing keeps every existing caller's degrade path working unchanged."""
+    script = make_claude(f"sys.stderr.write({_SESSION_LOST_STDERR!r})\ncode = 1")
+    with pytest.raises(ClaudeError):
+        await _cli(script).run("hi", resume="0000-1111")
+
+
+async def test_lost_session_detection_is_case_insensitive(make_claude):
+    script = make_claude("sys.stderr.write('NO CONVERSATION FOUND with session ID: x')\ncode = 1")
+    with pytest.raises(ClaudeSessionLost):
+        await _cli(script).run("hi", resume="x")
+
+
+async def test_an_ordinary_failure_is_not_mistaken_for_a_lost_session(make_claude):
+    """The marker must be specific: a plain error stays a plain ClaudeError, so the state machine
+    keeps the review alive rather than delivering the draft on a transient hiccup."""
+    script = make_claude("sys.stderr.write('boom: network unreachable')\ncode = 1")
+    with pytest.raises(ClaudeError) as exc:
+        await _cli(script).run("hi", resume="x")
+    assert not isinstance(exc.value, ClaudeSessionLost)
 
 
 async def test_non_json_output_raises(make_claude):

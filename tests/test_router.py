@@ -96,6 +96,24 @@ async def test_route_markdown_saves_the_file(settings):
     assert result.saved_path.read_text(encoding="utf-8") == "# routed"
 
 
+async def test_route_sends_a_review_prefixed_memo_to_the_review_loop(settings):
+    """`#검토` is the one route a message *kind* cannot decide, so route() checks it."""
+    msg = build_incoming_message(text_message(24, "#검토 인프라 예산 회의 메모"))
+    result = await route(msg, settings)  # claude_enabled=False → plain note + the reason
+
+    assert "검토 없이 저장했습니다" in result.reply
+    assert result.saved_path is not None
+
+
+async def test_route_leaves_a_plain_memo_on_the_one_shot_path(settings):
+    """The review route is opt-in: an ordinary memo must be untouched by increment 4."""
+    msg = build_incoming_message(text_message(25, "그냥 메모"))
+    result = await route(msg, settings)
+
+    assert "검토" not in result.reply
+    assert result.saved_path.read_text(encoding="utf-8").strip().endswith("그냥 메모")
+
+
 async def test_route_unsupported_document_asks_for_a_pdf(settings):
     msg = build_incoming_message(document_message(23, "deck.pptx", content=b"data"))
     result = await route(msg, settings)

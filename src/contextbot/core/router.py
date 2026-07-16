@@ -14,6 +14,7 @@ from typing import Awaitable, Callable, Optional
 from ..config import Settings
 from ..handlers.audio_handler import handle_audio
 from ..handlers.base import HandlerResult, IncomingMessage, MessageKind
+from ..handlers.conversation import handle_review_request, is_review_request
 from ..handlers.document_handler import handle_document
 from ..handlers.image_handler import handle_image
 from ..handlers.text_handler import handle_text
@@ -118,6 +119,12 @@ async def route(message: IncomingMessage, settings: Settings) -> HandlerResult:
     Authorization is not checked here: input comes only from the owner's own Saved Messages, and
     the client enforces the self-peer filter before routing.
     """
+    # The one route the kind alone cannot decide: `#검토` opts a memo into the review loop
+    # (increment 4). Dispatched here rather than inside handle_text so the two handlers stay
+    # independent of each other — text_handler owns the one-shot path and knows nothing of reviews.
+    if message.kind is MessageKind.TEXT and is_review_request(message.text):
+        return await handle_review_request(message, settings)
+
     handler = ROUTING_TABLE.get(message.kind)
     if handler is None:
         return HandlerResult(reply="🤔 지원하지 않는 형식의 메시지입니다.")

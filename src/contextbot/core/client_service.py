@@ -19,11 +19,14 @@ from telethon import TelegramClient, events
 
 from ..config import Settings
 from ..handlers.base import DeferMessage
+from ..handlers.conversation import discard_incomplete, expire_stale, handle_reply
 from .health import HealthChecker, HealthReport
 from .hwm import HighWaterMark
 from .notifier import Notifier
+from .review_poller import ReviewPoller
 from .router import build_incoming_message, route
 from .security import is_saved_messages
+from .session_store import build_store
 from .status import BotStatus, StatusModel
 
 logger = logging.getLogger("contextbot.client")
@@ -40,6 +43,7 @@ class ClientService:
         client=None,
         bot=None,
         hwm: Optional[HighWaterMark] = None,
+        store=None,
     ):
         self._settings = settings
         self._status = status_model
@@ -48,6 +52,10 @@ class ClientService:
         self._hwm = hwm or HighWaterMark(settings.session_path.parent / "hwm.json")
         self._notifier: Optional[Notifier] = None
         self._me_id: Optional[int] = None
+        # The review store is the same file the handlers write through (it is the authority, not a
+        # cache), so this instance agreeing with theirs costs nothing to arrange.
+        self._store = store or build_store(settings)
+        self._poller: Optional[ReviewPoller] = None
 
     # ------------------------------------------------------------------ builders
     def _build_client(self) -> TelegramClient:
@@ -84,6 +92,10 @@ class ClientService:
             # the HWM guard in _process dedupes any overlap.
             self._client.add_event_handler(self._on_new_message, events.NewMessage())
 
+            # Before catch-up: clear a review whose first turn died with the app. It holds the
+            # one-at-a-time guard against the very replay catch-up is about to perform.
+            discard_incomplete(self._store)
+
             # First run: baseline to the latest id so existing history isn't imported.
             if not self._hwm.exists():
                 latest = await self._latest_saved_id()
@@ -91,6 +103,10 @@ class ClientService:
                 logger.info("First run: baselined HWM to %s (existing history skipped)", latest)
 
             await self.catch_up()
+            # A review survives a restart — the transcript is on disk and keyed by a directory we
+            # kept (the measured resume contract). So if one was open when the app closed, pick it
+            # back up rather than stranding the owner's draft.
+            self._sync_polling()
         except DeferMessage as exc:
             # The backlog hit a usage limit. Halt instead of falling through to RUNNING — the
             # deferred message and everything after it stay unprocessed for the next Start.
@@ -106,6 +122,8 @@ class ClientService:
 
     async def stop(self, *, message: str = "중지됨") -> None:
         """Disconnect and report STOPPED. ``message`` lets a self-initiated stop explain itself."""
+        if self._poller is not None:
+            await self._poller.stop()
         client = self._client
         if client is None:
             self._status.set(BotStatus.STOPPED, message)
@@ -132,6 +150,64 @@ class ClientService:
                 f"({exc})"
             )
         await self.stop(message="⏸ 사용량 한도 — 리셋 후 Start를 눌러주세요")
+
+    # ------------------------------------------------------------------- reviews
+    def _sync_polling(self) -> None:
+        """Poll the bot DM exactly while a review is waiting on the owner.
+
+        Kept out of :class:`Notifier`, which stays send-only: capture reads Saved Messages over
+        Telethon and must never depend on the Bot API's 24h update retention. Only the review
+        conversation polls, and only for as long as one is open.
+        """
+        if not self._store.has_pending():
+            return
+        if self._poller is None:
+            self._poller = ReviewPoller(
+                self._bot,
+                self._notifier.owner_chat_id if self._notifier else None,
+                on_reply=self._on_review_reply,
+                on_tick=self._on_review_tick,
+                get_offset=lambda: self._store.update_offset,
+                set_offset=self._store.set_update_offset,
+                is_active=self._store.has_pending,
+                review_started_at=self._review_started_at,
+            )
+        self._poller.start()
+
+    def _review_started_at(self):
+        review = self._store.pending()
+        return review.created_at if review is not None else None
+
+    async def _on_review_reply(self, text: str) -> None:
+        """Feed one bot-DM reply into the open review and relay the outcome.
+
+        A review turn never raises :class:`DeferMessage` — see docs/PHASE2.md. There is no handler
+        to replay, and halting would stop this very poller, so a usage limit here reports itself
+        and leaves the review open for the owner to retry.
+        """
+        was_running = self._status.status == BotStatus.RUNNING
+        if was_running:
+            self._status.set(BotStatus.PROCESSING, "검토 반영 중…")
+        try:
+            reply = await handle_reply(text, self._settings, store=self._store)
+        except Exception as exc:  # noqa: BLE001 - a bad turn must not kill the poll loop
+            logger.exception("Review turn failed")
+            reply = f"⚠️ 검토 처리 중 오류가 발생했습니다: {exc}"
+        finally:
+            if was_running and self._status.status == BotStatus.PROCESSING:
+                self._status.set(BotStatus.RUNNING, "실행 중")
+        if reply and self._notifier is not None:
+            await self._notifier.send(reply)
+
+    async def _on_review_tick(self) -> None:
+        """Runs once per poll interval: retire a review the owner never answered."""
+        try:
+            reply = await expire_stale(self._settings, store=self._store)
+        except Exception:  # noqa: BLE001
+            logger.exception("Review expiry check failed")
+            return
+        if reply and self._notifier is not None:
+            await self._notifier.send(reply)
 
     def is_connected(self) -> bool:
         try:
@@ -199,7 +275,14 @@ class ClientService:
                 logger.info("Saved note: %s", result.saved_path)
             if result.reply and self._notifier is not None:
                 await self._notifier.send(result.reply)
+            # The HWM means *ingested*, not *note written*. A job that opened a review is fully
+            # ingested — its draft and resume handle are on disk, and the store owns it from here.
+            # Holding the watermark instead would block every later capture behind an unanswered
+            # review, and make a restart re-run the whole job over a draft that already exists.
             self._hwm.advance(incoming.message_id)
+            # Ask the store, not the result: a review is durable state, so the store is the truth
+            # about whether one is open, and the handlers need no new channel to say so.
+            self._sync_polling()
         except DeferMessage:
             # Transient (usage limit): leave the HWM untouched so the next Start replays this
             # message, and let the caller halt. Never advance here.

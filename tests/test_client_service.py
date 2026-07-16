@@ -211,3 +211,142 @@ async def test_permanent_failure_does_not_halt_on_restart(settings, tmp_path, mo
 
     await svc.start()
     assert svc._status.status == BotStatus.RUNNING
+
+
+# ---------------------------------------------------------------- review polling
+# Increment 4: the bot DM is polled *only* while a review waits on the owner, and the store — not
+# the handler's return value — is the truth about whether one is open. See docs/PHASE2.md.
+import asyncio
+from datetime import datetime, timezone
+
+from contextbot.core.session_store import SessionStore
+
+
+class PollableBot(FakeBot):
+    """A FakeBot that can also be long-polled, like the real telegram.Bot."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.update_calls: list[dict] = []
+
+    async def get_updates(self, **kwargs):
+        self.update_calls.append(kwargs)
+        await asyncio.sleep(3600)  # nothing to report; hold like a real long poll
+        return []
+
+
+def _with_store(settings, messages, tmp_path, *, hwm_start=0):
+    store = SessionStore(tmp_path / "reviews")
+    hwm = HighWaterMark(tmp_path / "hwm.json")
+    hwm.baseline(hwm_start)
+    svc = ClientService(
+        settings, StatusModel(), client=FakeClient(messages), bot=PollableBot(),
+        hwm=hwm, store=store,
+    )
+    return svc, store
+
+
+def _open_a_review(store, *, message_id=1):
+    review = store.create(
+        message_id=message_id, session_id="s",
+        title="검토 중", source_date=datetime.now(timezone.utc),
+    )
+    review.write_draft("초안 본문")
+    return review
+
+
+async def test_no_review_means_no_polling(settings, tmp_path):
+    """Capture reads Saved Messages over Telethon, so it must never depend on the Bot API's
+    24h update retention. Polling that ran all the time would blur that line."""
+    svc, store = _with_store(settings, [text_message(1, "메모")], tmp_path)
+
+    await svc.start()
+
+    assert svc._poller is None
+    assert svc._bot.update_calls == []
+    await svc.stop()
+
+
+async def test_a_started_review_turns_polling_on(settings, tmp_path, monkeypatch):
+    async def _route(incoming, settings):
+        _open_a_review(store, message_id=incoming.message_id)
+        return HandlerResult(reply="초안이 준비됐습니다")
+
+    svc, store = _with_store(settings, [text_message(1, "#검토 메모")], tmp_path)
+    monkeypatch.setattr(cs, "route", _route)
+
+    await svc.start()
+
+    assert svc._poller is not None and svc._poller.is_running
+    await svc.stop()
+
+
+async def test_a_review_opening_message_still_advances_the_hwm(settings, tmp_path, monkeypatch):
+    """The HWM means *ingested*, not *note written*. Holding it until the owner accepted would
+    block every later capture behind an unanswered review, and make a restart re-run the whole job
+    on top of a draft that already exists."""
+    async def _route(incoming, settings):
+        _open_a_review(store, message_id=incoming.message_id)
+        return HandlerResult(reply="초안")
+
+    svc, store = _with_store(settings, [text_message(5, "#검토 메모")], tmp_path)
+    monkeypatch.setattr(cs, "route", _route)
+
+    await svc.start()
+
+    assert svc._hwm.value == 5
+    assert svc._status.status == BotStatus.RUNNING  # and it did not halt
+    await svc.stop()
+
+
+async def test_a_review_open_at_startup_resumes_polling(settings, tmp_path):
+    """Row 5 of the resume contract: a review survives a restart, so the owner's draft must not be
+    stranded by one."""
+    svc, store = _with_store(settings, [], tmp_path)
+    _open_a_review(store)
+
+    await svc.start()
+
+    assert svc._poller is not None and svc._poller.is_running
+    await svc.stop()
+
+
+async def test_stopping_the_bot_stops_polling(settings, tmp_path):
+    svc, store = _with_store(settings, [], tmp_path)
+    _open_a_review(store)
+    await svc.start()
+
+    await svc.stop()
+
+    assert not svc._poller.is_running
+
+
+async def test_the_poller_reads_only_the_owners_dm(settings, tmp_path):
+    svc, store = _with_store(settings, [], tmp_path)
+    _open_a_review(store)
+
+    await svc.start()
+    for _ in range(100):
+        if svc._bot.update_calls:
+            break
+        await asyncio.sleep(0.01)
+    await svc.stop()
+
+    assert svc._bot.update_calls, "polling must actually reach the Bot API"
+    assert svc._bot.update_calls[0]["allowed_updates"] == ["message"]
+
+
+async def test_a_review_whose_first_turn_died_with_the_app_is_discarded_at_startup(
+    settings, tmp_path
+):
+    """It would otherwise hold the one-at-a-time guard against the very replay catch-up performs,
+    while the poller waited for an answer to a question that was never asked."""
+    svc, store = _with_store(settings, [], tmp_path)
+    store.create(message_id=1, session_id="dead", title="검토 중",
+                 source_date=datetime.now(timezone.utc))  # no draft → turn 1 never finished
+
+    await svc.start()
+
+    assert store.has_pending() is False
+    assert svc._poller is None  # …and nothing is polling for it
+    await svc.stop()

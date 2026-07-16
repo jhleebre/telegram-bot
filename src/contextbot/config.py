@@ -32,6 +32,10 @@ DEFAULT_CLAUDE_PDF_MODEL = "opus"
 # defaulting to opus. CLAUDE_IMAGE_MODEL is the dial if a real photo ever proves harder.
 DEFAULT_CLAUDE_IMAGE_MODEL = "sonnet"
 DEFAULT_CLAUDE_TIMEOUT_SEC = 120.0
+# How long a pending review waits for the owner before its draft is delivered unreviewed. Capped by
+# reality rather than taste: the Bot API retains updates for 24h, so a reply sent past that window
+# while the app is closed is dropped by Telegram and the review could never be finished anyway.
+DEFAULT_REVIEW_EXPIRY_HOURS = 24.0
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
@@ -75,6 +79,7 @@ class Settings:
     claude_pdf_model: str = DEFAULT_CLAUDE_PDF_MODEL
     claude_image_model: str = DEFAULT_CLAUDE_IMAGE_MODEL
     claude_timeout_sec: float = DEFAULT_CLAUDE_TIMEOUT_SEC
+    review_expiry_hours: float = DEFAULT_REVIEW_EXPIRY_HOURS
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return (
@@ -86,7 +91,8 @@ class Settings:
             f"claude_bin={self.claude_bin!r}, claude_model={self.claude_model!r}, "
             f"claude_pdf_model={self.claude_pdf_model!r}, "
             f"claude_image_model={self.claude_image_model!r}, "
-            f"claude_timeout_sec={self.claude_timeout_sec})"
+            f"claude_timeout_sec={self.claude_timeout_sec}, "
+            f"review_expiry_hours={self.review_expiry_hours})"
         )
 
     @classmethod
@@ -180,6 +186,19 @@ class Settings:
                         f"CLAUDE_TIMEOUT_SEC must be positive, got {claude_timeout_sec}"
                     )
 
+        review_expiry_hours = DEFAULT_REVIEW_EXPIRY_HOURS
+        raw_expiry = (env.get("REVIEW_EXPIRY_HOURS") or "").strip()
+        if raw_expiry:
+            try:
+                review_expiry_hours = float(raw_expiry)
+            except ValueError:
+                errors.append(f"REVIEW_EXPIRY_HOURS must be a number, got {raw_expiry!r}")
+            else:
+                if review_expiry_hours <= 0:
+                    errors.append(
+                        f"REVIEW_EXPIRY_HOURS must be positive, got {review_expiry_hours}"
+                    )
+
         if errors:
             raise ConfigError("Invalid configuration:\n  - " + "\n  - ".join(errors))
 
@@ -198,4 +217,5 @@ class Settings:
             claude_pdf_model=claude_pdf_model,
             claude_image_model=claude_image_model,
             claude_timeout_sec=claude_timeout_sec,
+            review_expiry_hours=review_expiry_hours,
         )

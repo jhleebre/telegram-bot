@@ -32,6 +32,13 @@ DEFAULT_EXECUTABLE = "claude"
 DEFAULT_MODEL = "sonnet"
 DEFAULT_TIMEOUT_SEC = 120.0
 
+# How a lost --resume target announces itself on stderr. Measured against CLI v2.1.187:
+#   $ claude -p --resume <unknown-uuid> …
+#   exit 1, stdout empty, stderr "No conversation found with session ID: <uuid>"
+# Matched lowercased and without the id, so the wording's capitalization or a trailing detail
+# cannot silently turn this back into an untyped error.
+_SESSION_LOST_MARKER = "no conversation found"
+
 # A GUI app launched from the Dock/Finder inherits launchd's minimal PATH
 # (/usr/local/bin:/bin:/usr/bin) — not the login shell's — so `claude` installed by Homebrew or
 # the native installer is invisible to shutil.which. These are the standard install locations,
@@ -79,6 +86,18 @@ class ClaudeUnavailable(ClaudeError):
 
 class ClaudeTimeout(ClaudeError):
     """The job exceeded its timeout budget and was killed."""
+
+
+class ClaudeSessionLost(ClaudeError):
+    """A ``--resume`` target no longer exists, so the conversation cannot be continued.
+
+    Sessions are keyed by **working-directory path** — the transcript lives at
+    ``~/.claude/projects/<slugified-cwd>/<session-id>.jsonl`` — so this fires when that directory
+    was deleted or the job is resumed from somewhere else. It is **terminal, not transient**: unlike
+    a usage limit (where the transcript is still on disk and resumes fine after the window resets),
+    there is nothing left to resume, ever. The review state machine relies on that distinction to
+    tell "hand the owner the draft" apart from "the engine is briefly unhappy".
+    """
 
 
 class ClaudeUsageLimit(ClaudeError):
@@ -260,7 +279,14 @@ class ClaudeCLI:
             if proc.returncode == 0:
                 raise
         if data is None:
-            detail = stderr.decode("utf-8", errors="replace").strip()[:300]
+            # A lost --resume target is reported *here* rather than as JSON: the CLI exits 1 with an
+            # empty stdout and the reason on stderr (measured, v2.1.187), so it arrives via this
+            # branch and would otherwise be an untyped ClaudeError indistinguishable from a network
+            # outage or a bad flag. The review state machine must tell the two apart.
+            text = stderr.decode("utf-8", errors="replace").strip()
+            detail = text[:300]
+            if _SESSION_LOST_MARKER in text.lower():
+                raise ClaudeSessionLost(detail)
             raise ClaudeError(f"claude exited {proc.returncode}: {detail or '<no stderr>'}")
 
         # `subtype` stays "success" even when is_error is true (verified against CLI v2.1.187),
