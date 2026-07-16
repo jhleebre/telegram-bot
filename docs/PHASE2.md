@@ -947,6 +947,10 @@ Points worth knowing before touching this:
 - **`확인!` is `확인`.** Accept/cancel matching strips trailing punctuation, because without it the
   reply falls through to a *revision* — spending a full LLM turn rewriting the note against the
   "instruction" `확인!`, at the exact moment the owner thought they were done.
+- **The trigger is a whole word, not a `startswith`.** `#검토된 사항 정리` is a memo *about* something
+  reviewed; a bare prefix match diverted it into the review loop **and** handed the model
+  `된 사항 정리`, drafting a note from mangled text. A Markdown `# 검토 …` heading has a space after
+  the hash and was never affected.
 
 *(The three bullets above came out of a review of this increment's own diff, not the design. Two of
 them — the unbounded block and the immortal `FINALIZING` — were silent strandings of exactly the

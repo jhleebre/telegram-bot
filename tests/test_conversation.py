@@ -109,13 +109,32 @@ def note_data(settings) -> tuple[dict, str]:
     [
         ("#검토 회의 메모", True),
         ("  #검토 회의 메모", True),
+        ("#검토\n회의 메모", True),  # a newline is a word boundary too
+        ("#검토", True),  # the trigger alone → "검토할 내용이 없습니다"
         ("회의 메모", False),
         ("메모에 #검토 라고 적었다", False),  # only a *prefix* opts in
         ("", False),
+        # The prefix must be a whole word. `#검토된 사항` is a memo *about* something reviewed —
+        # and a bare startswith would also have handed the model `된 사항`, drafting a note from
+        # mangled text.
+        ("#검토된 사항 정리하기", False),
+        ("#검토사항 정리", False),
+        # A Markdown H1 has a space after the hash, so it was never a trigger.
+        ("# 검토 회의", False),
     ],
 )
 def test_is_review_request(text, expected):
     assert is_review_request(text) is expected
+
+
+async def test_a_memo_starting_with_a_similar_word_is_not_mangled(settings, store):
+    """The failure the word-boundary check prevents: diverted *and* silently truncated."""
+    from contextbot.core.router import route
+
+    result = await route(memo("#검토된 사항 정리하기"), settings)
+
+    assert store.has_pending() is False
+    assert result.saved_path.read_text(encoding="utf-8").strip().endswith("#검토된 사항 정리하기")
 
 
 async def test_a_plain_memo_never_enters_the_review_loop(live, store):

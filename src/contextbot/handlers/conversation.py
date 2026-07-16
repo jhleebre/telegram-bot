@@ -78,8 +78,19 @@ _SYSTEM_PROMPT = (
 
 # --------------------------------------------------------------------------- parsing
 def is_review_request(text: str) -> bool:
-    """True when a memo opts into the review loop."""
-    return text.strip().startswith(REVIEW_PREFIX)
+    """True when a memo opts into the review loop.
+
+    The prefix must be a **word of its own** — followed by whitespace, or nothing at all. A bare
+    ``startswith`` also matches ``#검토된 사항 정리``, which is a memo about something reviewed, not
+    a request to review it; worse, ``strip_prefix`` would then hand the model ``된 사항 정리`` and
+    silently draft a note from mangled text. A Markdown heading (``# 검토 …``) has a space after
+    the hash and was never affected.
+    """
+    stripped = text.strip()
+    if not stripped.startswith(REVIEW_PREFIX):
+        return False
+    rest = stripped[len(REVIEW_PREFIX) :]
+    return rest == "" or rest[0].isspace()
 
 
 def strip_prefix(text: str) -> str:
