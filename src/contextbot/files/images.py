@@ -1,14 +1,15 @@
-"""Image format normalization: make a sent image readable by both consumers.
+"""Image format normalization and inline embedding.
 
 An image the bot ingests has to satisfy **two** independent readers, and they agree on the answer:
 
 - **Claude's ``Read`` tool**, which renders the image for the model. Measured against the real CLI
   (v2.1.187): it renders ``png`` / ``jpg`` / ``jpeg`` / ``gif`` / ``webp``, and does **not** render
   ``heic`` / ``bmp``.
-- **MarkNotes**, which renders the embed in the vault. Its ``ALLOWED_IMAGE_EXTENSIONS`` are
-  ``.jpg .jpeg .png .gif .svg .webp`` — the same set, minus the two.
+- **MarkNotes**, which renders the note. Its ``ALLOWED_IMAGE_EXTENSIONS`` are
+  ``.jpg .jpeg .png .gif .svg .webp`` and its ``getImageMimeType`` maps exactly those — the same
+  set, minus the two.
 
-So the formats that need converting are the same for both: **heic/heif/bmp → png**.
+So the formats that need converting are the same for both: **heic/heif → jpeg, bmp → png**.
 
 **Why this module exists at all** (the increment-3 finding, and the reason it is not optional):
 asked to read a ``.heic``, ``Read`` does not fail. It returns the file's **raw bytes**, and the
@@ -22,6 +23,12 @@ removes the question.
 A ``.heic`` is the realistic input here — it is what an iPhone sends when the owner picks
 "send as file" instead of a compressed photo.
 
+**Why the conversion target depends on the source.** The note *embeds the image inline* (base64),
+so the converted size is the note's size. Measured on a 12MP photo: a 1.85MB ``.heic`` becomes an
+**18.3MB PNG** — a 24MB note — but a **4.0MB JPEG**, a 5.3MB note. A camera photo is already
+lossy, so re-encoding it losslessly buys nothing and costs 10x. A ``.bmp`` is the opposite case:
+uncompressed screen content, where PNG is both lossless and far smaller.
+
 Conversion uses **``sips``**, which ships with macOS: no new dependency, and this app is macOS-only
 already (the UI is a native Qt app and increment 5's STT is Apple-Silicon ``mlx-whisper``).
 """
@@ -29,6 +36,7 @@ already (the UI is a native Qt app and increment 5's STT is Apple-Silicon ``mlx-
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import shutil
@@ -36,11 +44,31 @@ from pathlib import Path
 
 logger = logging.getLogger("contextbot.files.images")
 
-# Rendered as an image by both Claude's Read and MarkNotes — staged as-is, no re-encode.
+# Rendered as an image by both Claude's Read and MarkNotes — embedded as-is, never re-encoded.
 VISION_READABLE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
-# Readable by neither. Converted to PNG before anything else touches them.
-TRANSCODE_EXTS = {".heic", ".heif", ".bmp"}
+# Readable by neither. Converted before anything else touches them, to the closest renderable
+# equivalent: a lossy camera photo becomes a JPEG, lossless screen content becomes a PNG.
+TRANSCODE_TARGETS = {
+    ".heic": "jpeg",
+    ".heif": "jpeg",
+    ".bmp": "png",
+}
+# Anything else unrenderable falls back to PNG: it cannot make an already-lossy file worse, and
+# the size blowup only bites on photographs, which are the heic case above.
+_DEFAULT_TARGET = "png"
+
+_TARGET_SUFFIX = {"jpeg": ".jpg", "png": ".png"}
+
+# MarkNotes' own getImageMimeType, so an embedded data URL is one it renders.
+_MIME_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
+    ".webp": "image/webp",
+}
 
 _SIPS = "sips"
 # sips lives in /usr/bin, which is on launchd's minimal PATH, so a Dock-launched app finds it
@@ -67,35 +95,53 @@ def needs_transcode(src: Path) -> bool:
     return src.suffix.lower() not in VISION_READABLE_EXTS
 
 
+def mime_type(src: Path) -> str:
+    """The MIME type for a data URL, per MarkNotes' own mapping."""
+    return _MIME_TYPES.get(src.suffix.lower(), "application/octet-stream")
+
+
+def to_data_url(src: Path) -> str:
+    """Return ``src`` as a ``data:<mime>;base64,…`` URL, for embedding straight into a note.
+
+    This is how the image gets *into* the Markdown rather than beside it. MarkNotes supports both
+    forms, and the embedded one is what this bot writes: it needs no ``.assets/`` file and no entry
+    in that folder's ``.metadata.json`` reference-tracking, so a note the bot wrote is complete and
+    self-contained the moment it lands.
+    """
+    encoded = base64.b64encode(src.read_bytes()).decode("ascii")
+    return f"data:{mime_type(src)};base64,{encoded}"
+
+
 async def normalize(src: Path, dest_dir: Path) -> Path:
     """Return a path to ``src`` in a renderable format, converting into ``dest_dir`` if needed.
 
-    Returns ``src`` untouched when it is already renderable — re-encoding a PNG would only lose
-    quality and time. Otherwise converts to PNG (lossless, and the safest input for OCR).
+    Returns ``src`` untouched when it is already renderable — re-encoding it would only lose
+    quality and inflate the note that embeds it.
 
     Raises :class:`ImageError` when conversion is impossible or produces nothing. That is a
-    *permanent* failure for these bytes, never a deferral: the caller writes a stub note that
-    still embeds the original, so the capture survives.
+    *permanent* failure for these bytes, never a deferral.
     """
     if not needs_transcode(src):
         return src
 
     ext = src.suffix.lower()
-    if ext not in TRANSCODE_EXTS:
+    target = TRANSCODE_TARGETS.get(ext)
+    if target is None:
         # An extension we have not measured. Try anyway rather than refusing outright: sips reads
-        # far more formats than we list, and the stub-note path catches it if this fails.
+        # far more formats than we list, and the failure path catches it if this does not work.
         logger.info("unmeasured image format %s; attempting conversion", ext)
+        target = _DEFAULT_TARGET
 
     sips = _resolve_sips()
     if sips is None:
         raise ImageError(f"{ext} 이미지를 변환할 수 없습니다 (sips를 찾지 못했습니다)")
 
-    dest = dest_dir / f"{src.stem}.png"
+    dest = dest_dir / f"{src.stem}{_TARGET_SUFFIX[target]}"
     proc = await asyncio.create_subprocess_exec(
         sips,
         "-s",
         "format",
-        "png",
+        target,
         str(src),
         "--out",
         str(dest),
@@ -115,7 +161,13 @@ async def normalize(src: Path, dest_dir: Path) -> Path:
     # sips reports some failures with a zero exit code and no output file, so check the file.
     if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size == 0:
         detail = stderr.decode("utf-8", errors="replace").strip()[:200]
-        raise ImageError(f"{ext} 이미지를 PNG로 변환하지 못했습니다 — {detail or 'sips 실패'}")
+        raise ImageError(f"{ext} 이미지를 {target.upper()}로 변환하지 못했습니다 — {detail or 'sips 실패'}")
 
-    logger.info("converted %s → %s", src.name, dest.name)
+    logger.info(
+        "converted %s → %s (%.1fMB → %.1fMB)",
+        src.name,
+        dest.name,
+        src.stat().st_size / 1e6,
+        dest.stat().st_size / 1e6,
+    )
     return dest

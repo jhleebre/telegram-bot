@@ -14,11 +14,6 @@ except ImportError:  # pragma: no cover - dotenv is a declared dependency
 DEFAULT_INBOX_DIR = "~/Documents/MarkNotes/0_inbox"
 # Where originals (pdf/txt/csv) land once their note is written. See files/originals.py.
 DEFAULT_DOWNLOADS_DIR = "~/Downloads"
-# The vault's shared image folder, relative to the vault root (the inbox's parent). An ingested
-# image is *kept* here so the note's embed resolves — MarkNotes' own convention, and it resolves
-# `.assets/…` from the vault root, so the link survives triage. Mirrored in files/originals.py,
-# which stays standalone (as it already does for DEFAULT_DOWNLOADS_DIR).
-ASSETS_DIR_NAME = ".assets"
 # Project root is two levels up from this file (src/contextbot/config.py).
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SESSION_PATH = _PROJECT_ROOT / "state" / "contextbot.session"
@@ -62,9 +57,6 @@ class Settings:
     - ``owner_chat_id``: optional override for the reply target; normally derived from the user's
       own account id at runtime.
     - ``downloads_dir``: where document originals are moved after their note is written.
-    - ``assets_dir``: the vault's shared image folder — where an ingested image is *kept* (not
-      filed away), so the note's ``.assets/…`` embed resolves. Defaults to the vault root's
-      ``.assets``, which is MarkNotes' own convention.
     - ``claude_*``: Phase 2 engine — the headless ``claude -p`` CLI. When ``claude_enabled`` is
       False (or the CLI is missing), pipelines fall back to their no-LLM path.
     """
@@ -75,7 +67,6 @@ class Settings:
     telegram_bot_token: str
     inbox_dir: Path
     downloads_dir: Path = Path(DEFAULT_DOWNLOADS_DIR).expanduser()
-    assets_dir: Path | None = None
     owner_chat_id: int | None = None
     log_level: str = "INFO"
     claude_enabled: bool = True
@@ -85,20 +76,11 @@ class Settings:
     claude_image_model: str = DEFAULT_CLAUDE_IMAGE_MODEL
     claude_timeout_sec: float = DEFAULT_CLAUDE_TIMEOUT_SEC
 
-    def __post_init__(self) -> None:
-        # Derived, not defaulted: `.assets` belongs to the *vault*, and the only handle on the
-        # vault root is the inbox's parent (a relationship `load` already relies on when it
-        # insists that parent exists). A static default would point every hand-built Settings —
-        # every test — at the real vault; deriving it means a temp inbox brings a temp .assets.
-        if self.assets_dir is None:
-            object.__setattr__(self, "assets_dir", self.inbox_dir.parent / ASSETS_DIR_NAME)
-
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return (
             f"Settings(api_id={self.api_id}, api_hash=<hidden>, "
             f"session_path={self.session_path!s}, telegram_bot_token=<hidden>, "
             f"inbox_dir={self.inbox_dir!s}, downloads_dir={self.downloads_dir!s}, "
-            f"assets_dir={self.assets_dir!s}, "
             f"owner_chat_id={self.owner_chat_id}, "
             f"log_level={self.log_level!r}, claude_enabled={self.claude_enabled}, "
             f"claude_bin={self.claude_bin!r}, claude_model={self.claude_model!r}, "
@@ -166,10 +148,6 @@ class Settings:
         # this is created on demand the first time an original is moved.
         downloads_dir = _expand(env.get("DOWNLOADS_DIR") or DEFAULT_DOWNLOADS_DIR)
 
-        # None → derived from the vault root in __post_init__. Also created on demand.
-        raw_assets = (env.get("ASSETS_DIR") or "").strip()
-        assets_dir = _expand(raw_assets) if raw_assets else None
-
         log_level = (env.get("LOG_LEVEL") or "INFO").strip().upper()
         if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
             errors.append(f"LOG_LEVEL must be a valid level, got {log_level!r}")
@@ -212,7 +190,6 @@ class Settings:
             telegram_bot_token=token,
             inbox_dir=inbox_dir,
             downloads_dir=downloads_dir,
-            assets_dir=assets_dir,
             owner_chat_id=owner_chat_id,
             log_level=log_level,
             claude_enabled=claude_enabled,

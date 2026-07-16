@@ -5,6 +5,7 @@ canned text, and downloads write bytes to the path the handler chose — which i
 staging isolation be asserted as the model would actually see it.
 """
 
+import base64
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,9 @@ from contextbot.handlers.base import DeferMessage, IncomingMessage, MessageKind
 from contextbot.handlers.image_handler import handle_image
 
 DATE = datetime(2026, 7, 15, 14, 30, tzinfo=timezone.utc)
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\nnot a real png, but these exact bytes must survive the round trip"
+JPEG_BYTES = b"\xff\xd8\xff\xe0jpeg-ish"
 
 DESCRIPTION = """제목: 3분기 인프라 예산 검토 화면
 
@@ -105,9 +109,10 @@ def _body(path: Path) -> str:
     return path.read_text(encoding="utf-8").split("---\n", 2)[2]
 
 
-def _assets(settings) -> list[str]:
-    d = settings.assets_dir
-    return sorted(p.name for p in d.iterdir()) if d.exists() else []
+def _embedded_bytes(body: str) -> bytes:
+    """Decode the image back out of the note's data URL — the note *is* the storage now."""
+    encoded = body.split(";base64,", 1)[1].split(")", 1)[0]
+    return base64.b64decode(encoded)
 
 
 @pytest.fixture
@@ -132,8 +137,10 @@ def fake_sips(monkeypatch):
     async def _convert(src, dest_dir):
         if src.suffix.lower() in images.VISION_READABLE_EXTS:
             return src
-        dest = Path(dest_dir) / f"{src.stem}.png"
-        dest.write_bytes(b"\x89PNG\r\n\x1a\nconverted")
+        # Mirror the real target mapping: a heic is a camera photo and becomes a JPEG, not a PNG.
+        suffix = ".png" if images.TRANSCODE_TARGETS.get(src.suffix.lower()) == "png" else ".jpg"
+        dest = Path(dest_dir) / f"{src.stem}{suffix}"
+        dest.write_bytes(JPEG_BYTES if suffix == ".jpg" else PNG_BYTES)
         src.unlink()  # sips leaves the original; the handler stages a temp dir either way
         return dest
 
@@ -142,45 +149,37 @@ def fake_sips(monkeypatch):
 
 # =================================================================== the happy path
 async def test_image_note_embeds_the_image_and_the_description(llm_settings):
-    result = await handle_image(_msg("shot.png"), llm_settings, engine=FakeEngine())
+    result = await handle_image(_msg("shot.png", PNG_BYTES), llm_settings, engine=FakeEngine())
 
     assert result.saved_path is not None
     body = _body(result.saved_path)
-    stored = _assets(llm_settings)[0]
-    # The embed comes first, and points at the file that actually exists in the vault.
-    assert body.strip().startswith(f"![{Path(stored).stem}](.assets/{stored})")
+    # The embed comes first, and carries the image's actual bytes.
+    assert body.strip().startswith("![3분기_인프라_예산_검토_화면](data:image/png;base64,")
+    assert _embedded_bytes(body) == PNG_BYTES
     assert "2026 3분기 인프라 예산 검토" in body
     assert "## 텍스트" in body
 
 
-async def test_image_is_kept_in_the_vault_not_moved_to_downloads(llm_settings):
-    """Unlike every increment-2 route: the note embeds the image, so it lives in the vault."""
+async def test_the_note_is_the_only_thing_written(llm_settings):
+    """The image goes *inside* the note, so nothing is left beside it: no .assets file to keep in
+    sync with MarkNotes' .metadata.json ledger, and nothing filed to Downloads."""
     await handle_image(_msg("shot.png"), llm_settings, engine=FakeEngine())
 
-    assert len(_assets(llm_settings)) == 1
-    downloads = llm_settings.downloads_dir
-    assert not downloads.exists() or list(downloads.iterdir()) == []
-
-
-async def test_embed_link_resolves_from_the_vault_root(llm_settings):
-    """MarkNotes resolves `.assets/x` against the vault root, so the link must be exactly that —
-    and the file must be there, or the note renders a broken image."""
-    result = await handle_image(_msg("shot.png"), llm_settings, engine=FakeEngine())
-
-    stored = _assets(llm_settings)[0]
-    assert f"(.assets/{stored})" in _body(result.saved_path)
+    assert len(list(llm_settings.inbox_dir.iterdir())) == 1
     vault_root = llm_settings.inbox_dir.parent
-    assert (vault_root / ".assets" / stored).is_file()
+    assert not (vault_root / ".assets").exists()
+    assert not llm_settings.downloads_dir.exists()
 
 
-async def test_image_is_named_after_its_note(llm_settings):
-    result = await handle_image(_msg("shot.png"), llm_settings, engine=FakeEngine())
+async def test_the_mime_type_matches_the_format(llm_settings):
+    """MarkNotes renders the data URL by its declared MIME type, so a jpeg must not claim png."""
+    result = await handle_image(
+        _msg(None, JPEG_BYTES, kind=MessageKind.IMAGE, auto_ext=".jpg"),
+        llm_settings,
+        engine=FakeEngine(),
+    )
 
-    stored = _assets(llm_settings)[0]
-    assert stored.startswith("260715-1430-")
-    assert stored.endswith(".png")
-    # The note and its image sort together.
-    assert result.saved_path.stem == Path(stored).stem
+    assert "(data:image/jpeg;base64," in _body(result.saved_path)
 
 
 async def test_title_comes_from_the_model_not_the_filename(llm_settings):
@@ -219,55 +218,69 @@ async def test_an_untitled_photo_with_no_title_line_still_gets_a_note(llm_settin
     assert _fm(result.saved_path)["title"] == "이미지"
 
 
-async def test_frontmatter_records_the_source_and_the_image(llm_settings):
-    result = await handle_image(_msg("shot.png", message_id=31), llm_settings, engine=FakeEngine())
+async def test_frontmatter_records_the_source(llm_settings):
+    result = await handle_image(
+        _msg("shot.png", message_id=31), llm_settings, engine=FakeEngine()
+    )
 
     fm = _fm(result.saved_path)
     assert fm["telegram_message_id"] == 31
     assert fm["type"] == "image"
-    assert fm["image"] == f".assets/{_assets(llm_settings)[0]}"
+    assert fm["original_file"] == "shot.png"
+    # No `image:` key: there is no file to point at, so a path there could only ever be a lie.
+    assert "image" not in fm
+
+
+async def test_a_photo_records_no_original_filename(llm_settings):
+    """A Telegram photo has no name; recording the temp name we invented would say nothing."""
+    result = await handle_image(
+        _msg(None, kind=MessageKind.IMAGE, auto_ext=".jpg"), llm_settings, engine=FakeEngine()
+    )
+
+    assert "original_file" not in _fm(result.saved_path)
 
 
 async def test_a_telegram_photo_has_no_filename_and_still_works(llm_settings):
     """A Telegram *photo* carries no file name; Telethon supplies the `.jpg` on download.
 
     The photo is the single most common input, so it must reach the model as a readable image and
-    land in the vault as one — with no conversion, since `.jpg` already is one.
+    land in the note as one — with no conversion, since `.jpg` already is one.
     """
     engine = FakeEngine()
     result = await handle_image(
-        _msg(None, kind=MessageKind.IMAGE, auto_ext=".jpg"), llm_settings, engine=engine
+        _msg(None, JPEG_BYTES, kind=MessageKind.IMAGE, auto_ext=".jpg"),
+        llm_settings,
+        engine=engine,
     )
 
     assert result.saved_path is not None
-    assert _assets(llm_settings)[0].endswith(".jpg")
+    assert _embedded_bytes(_body(result.saved_path)) == JPEG_BYTES
     # It was staged and described as a real image, not silently degraded to a stub.
     assert engine.calls[0]["visible"] == ["telegram-7.jpg"]
     assert "설명을 생성하지 못했습니다" not in _body(result.saved_path)
 
 
-async def test_heic_is_converted_before_the_model_and_before_the_vault(llm_settings, fake_sips):
+async def test_heic_is_converted_before_the_model_and_before_the_note(llm_settings, fake_sips):
     """The iPhone case, and the reason files/images.py exists.
 
     `Read` does not render a heic — it returns raw bytes and the model describes the *file header*
-    while reporting success. MarkNotes cannot render one either. So the PNG is what the model sees
-    *and* what the note embeds; the heic must not survive into either.
+    while reporting success. MarkNotes cannot render one either. So the converted image is what the
+    model sees *and* what the note embeds; the heic must not survive into either.
     """
     engine = FakeEngine()
     result = await handle_image(_msg("IMG_4821.heic"), llm_settings, engine=engine)
 
-    assert engine.calls[0]["visible"] == ["IMG_4821.png"]  # the heic never reaches the model
-    stored = _assets(llm_settings)[0]
-    assert stored.endswith(".png")
-    assert f"(.assets/{stored})" in _body(result.saved_path)
+    assert engine.calls[0]["visible"] == ["IMG_4821.jpg"]  # the heic never reaches the model
+    body = _body(result.saved_path)
+    assert "(data:image/jpeg;base64," in body
+    assert b"heic" not in _embedded_bytes(body)
 
 
 async def test_a_readable_image_is_never_re_encoded(llm_settings, fake_sips):
-    """Re-encoding a PNG would only cost quality and time — it is already what both readers want."""
-    engine = FakeEngine()
-    await handle_image(_msg("shot.png", b"\x89PNG\r\n\x1a\noriginal"), llm_settings, engine=engine)
+    """Re-encoding a PNG would cost quality and inflate the note that carries it."""
+    result = await handle_image(_msg("shot.png", PNG_BYTES), llm_settings, engine=FakeEngine())
 
-    assert (llm_settings.assets_dir / _assets(llm_settings)[0]).read_bytes().endswith(b"original")
+    assert _embedded_bytes(_body(result.saved_path)) == PNG_BYTES
 
 
 # =================================================================== isolation & prompt
@@ -305,12 +318,12 @@ async def test_image_runs_on_the_image_model(llm_settings):
 async def test_sentinel_writes_a_stub_note_that_still_embeds_the_image(llm_settings):
     """No description is recoverable — but the image is, and it is what the owner sent."""
     result = await handle_image(
-        _msg("shot.png"), llm_settings, engine=FakeEngine(text="DESCRIPTION_FAILED")
+        _msg("shot.png", PNG_BYTES), llm_settings, engine=FakeEngine(text="DESCRIPTION_FAILED")
     )
 
     assert result.saved_path is not None
     body = _body(result.saved_path)
-    assert f"(.assets/{_assets(llm_settings)[0]})" in body
+    assert _embedded_bytes(body) == PNG_BYTES  # the capture survives in full
     assert "설명을 생성하지 못했습니다" in body
     assert "설명 없이 저장했습니다" in result.reply
 
@@ -338,39 +351,64 @@ async def test_unusable_replies_all_degrade_to_a_stub(llm_settings, text):
 # =================================================================== degradation
 async def test_engine_failure_still_saves_the_image(llm_settings):
     result = await handle_image(
-        _msg("shot.png"), llm_settings, engine=FakeEngine(raises=ClaudeTimeout("30s 초과"))
+        _msg("shot.png", PNG_BYTES),
+        llm_settings,
+        engine=FakeEngine(raises=ClaudeTimeout("30s 초과")),
     )
 
-    assert len(_assets(llm_settings)) == 1
+    assert _embedded_bytes(_body(result.saved_path)) == PNG_BYTES
     assert "설명 없이 저장했습니다" in result.reply
     assert "30s 초과" in _body(result.saved_path)
 
 
 async def test_claude_disabled_saves_the_image_without_calling_the_engine(settings):
     engine = FakeEngine()
-    result = await handle_image(_msg("shot.png"), settings, engine=engine)
+    result = await handle_image(_msg("shot.png", PNG_BYTES), settings, engine=engine)
 
     assert engine.calls == []
-    assert len(_assets(settings)) == 1
+    assert _embedded_bytes(_body(result.saved_path)) == PNG_BYTES
     assert "CLAUDE_ENABLED=false" in _body(result.saved_path)
 
 
-async def test_oversized_image_is_kept_but_not_described(llm_settings):
+# --- the two cases where there is nothing embeddable, so there is no note to write
+async def test_an_image_too_big_to_embed_is_filed_to_downloads_instead(llm_settings):
+    """The image *is* the note now, so one that cannot go in leaves nothing worth writing —
+    but the file itself is still handed back rather than dropped."""
     engine = FakeEngine()
     result = await handle_image(_msg("huge.png", b"x" * 11_000_000), llm_settings, engine=engine)
 
-    assert engine.calls == []  # never sent to the model
-    assert len(_assets(llm_settings)) == 1  # but still kept and embedded
-    assert "너무 큽니다" in _body(result.saved_path)
+    assert engine.calls == []  # never sent to the model: we already know it cannot be embedded
+    assert result.saved_path is None
+    assert list(llm_settings.inbox_dir.iterdir()) == []
+    assert (llm_settings.downloads_dir / "huge.png").is_file()
+    assert "너무 커서" in result.reply and "Downloads" in result.reply
 
 
-async def test_unconvertible_image_is_kept_but_not_described(llm_settings, no_sips):
+async def test_the_size_cap_applies_after_conversion_not_before(llm_settings, monkeypatch):
+    """A 1.85MB .heic becomes a 4MB JPEG — and would become an 18MB PNG. Only the converted size
+    predicts the note's size, so checking the original's would let a monster through."""
+
+    async def _explode(src, dest_dir):
+        dest = Path(dest_dir) / f"{src.stem}.jpg"
+        dest.write_bytes(b"x" * 11_000_000)
+        return dest
+
+    monkeypatch.setattr("contextbot.handlers.image_handler.normalize", _explode)
+
+    result = await handle_image(_msg("IMG.heic", b"small"), llm_settings, engine=FakeEngine())
+
+    assert result.saved_path is None  # caught, despite the original being 5 bytes
+    assert (llm_settings.downloads_dir / "IMG.heic").is_file()
+
+
+async def test_an_unconvertible_image_is_filed_to_downloads_instead(llm_settings, no_sips):
     engine = FakeEngine()
     result = await handle_image(_msg("photo.heic"), llm_settings, engine=engine)
 
     assert engine.calls == []
-    assert "변환 실패" in _body(result.saved_path)
-    assert len(_assets(llm_settings)) == 1
+    assert result.saved_path is None
+    assert "변환 실패" in result.reply
+    assert (llm_settings.downloads_dir / "photo.heic").is_file()
 
 
 # =================================================================== the deferral rule
@@ -388,8 +426,8 @@ async def test_usage_limit_leaves_no_side_effect(llm_settings):
             _msg("shot.png"), llm_settings, engine=FakeEngine(raises=ClaudeUsageLimit("limit"))
         )
 
-    assert _assets(llm_settings) == []
     assert list(llm_settings.inbox_dir.iterdir()) == []
+    assert not llm_settings.downloads_dir.exists()
 
 
 # =================================================================== collisions
@@ -398,8 +436,4 @@ async def test_two_images_never_overwrite_each_other(llm_settings):
     second = await handle_image(_msg("shot.png", message_id=2), llm_settings, engine=FakeEngine())
 
     assert first.saved_path != second.saved_path
-    assert len(_assets(llm_settings)) == 2
-    # Each note points at its *own* image, not the other's.
-    for result in (first, second):
-        stored = _body(result.saved_path).split("(.assets/")[1].split(")")[0]
-        assert (llm_settings.assets_dir / stored).is_file()
+    assert len(list(llm_settings.inbox_dir.iterdir())) == 2

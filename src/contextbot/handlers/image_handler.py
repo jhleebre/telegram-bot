@@ -6,8 +6,14 @@ above a Claude-generated description + OCR. One-shot VLM call, no review loop (t
 
 What makes this route different from every increment-2 one:
 
-1. **The original is kept, not filed away.** It moves *into* the vault's ``.assets/`` — the note
-   embeds it, so the image is the note's content, not a leftover. See ``files/originals.py``.
+1. **The image goes *inside* the note**, base64-encoded into the Markdown
+   (``![…](data:image/jpeg;base64,…)``). There is no original left over to file away: the note is
+   the storage. MarkNotes supports this alongside its ``.assets/`` folder, and the embedded form is
+   the one to write — an ``.assets/`` image is only half the story, because that folder's
+   ``.metadata.json`` tracks which notes reference which file, and a bot writing files in behind
+   the app's back would leave that ledger wrong. Embedding sidesteps the ledger entirely: a note
+   the bot wrote is complete and self-contained the moment it lands. (Sharing one file across
+   notes is what ``.assets/`` buys, and this vault is text-first — the reuse never happens.)
 2. **A failure still produces a note.** A PDF without its conversion is nothing, so that route
    writes no note. An image without its description is still the image, and the owner sent it to
    keep it — so a non-limit failure writes a **stub note that embeds it anyway** and says the
@@ -31,21 +37,22 @@ from pathlib import Path
 from ..config import Settings
 from ..engine import prompts
 from ..engine.claude_cli import ClaudeCLI, ClaudeError, ClaudeUsageLimit, build_engine
-from ..files.images import ImageError, normalize
-from ..files.originals import embed_link, move_into_assets
+from ..files.images import ImageError, normalize, to_data_url
+from ..files.originals import move_to_downloads
 from ..notes.markdown_writer import write_note
-from ..notes.naming import build_filename, slugify
+from ..notes.naming import slugify
 from .base import DeferMessage, HandlerResult, IncomingMessage
 from .downloads import download_attachment
 from .text_handler import clean_title
 
 logger = logging.getLogger("contextbot.handlers.image")
 
-# The image is stored as a file and embedded by reference, so the note does not grow with it —
-# which is why this is far more generous than the document routes' 2MB. The number is MarkNotes'
-# own MAX_IMAGE_SIZE: past it, the vault refuses to embed the image when exporting to PDF, so a
-# larger file would be one the note could not fully use anyway.
-_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+# MarkNotes' own MAX_IMAGE_SIZE, applied to the bytes that actually get embedded — i.e. **after**
+# any conversion, which is the only measurement that means anything: a 1.85MB iPhone .heic becomes
+# a 4MB JPEG, and would have become an 18MB PNG. Base64 inflates by a further ~4/3, so 10MB of
+# image is a ~13MB note. Past this the vault refuses to embed it anyway, so there is nothing to be
+# gained by writing one.
+_MAX_EMBED_BYTES = 10 * 1024 * 1024
 
 # Describing one image is a small job next to converting a deck, but Read renders the image over
 # a couple of turns; keep the floor above the text path's 60s without inheriting the PDF's 300s.
@@ -120,8 +127,13 @@ def _body(embed: str, description: str | None, reason: str | None) -> str:
     return (
         f"{embed}\n\n"
         f"> ⚠️ 이미지 설명을 생성하지 못했습니다 — {reason}\n"
-        "> 원본 이미지는 위에 그대로 남아 있습니다."
+        "> 이미지는 이 노트 안에 그대로 들어 있습니다."
     )
+
+
+def _undelivered_reply(name: str, reason: str, moved: Path) -> str:
+    """No embeddable image means no note — so say why, and say where the file went."""
+    return f"🖼️ {name} 을(를) 노트로 만들지 못했습니다.\n원인: {reason}\n📎 원본: {moved}"
 
 
 async def _describe(
@@ -152,31 +164,36 @@ async def handle_image(
     *,
     engine: ClaudeCLI | None = None,
 ) -> HandlerResult:
-    """A sent image → a note embedding it, with a description + OCR beneath."""
+    """A sent image → a note with the image embedded in it, described and transcribed."""
     with tempfile.TemporaryDirectory(prefix="contextbot-img-") as tmp:
         stage = Path(tmp)
         src = await download_attachment(message, stage)
 
-        size = src.stat().st_size
-        if size > _MAX_IMAGE_BYTES:
-            # Permanent, so it replies and advances rather than deferring — but the image is still
-            # kept and embedded, because that is the part worth saving.
-            reason = (
-                f"파일이 너무 큽니다 ({size / 1_000_000:.1f}MB, "
-                f"최대 {_MAX_IMAGE_BYTES / 1_000_000:.0f}MB)"
-            )
-            return _write(message, settings, src, description=None, reason=reason)
-
         # Normalize before the model sees it: `Read` renders neither heic nor bmp, and given one it
         # describes the file's bytes rather than admitting it cannot see (increment-3 finding).
-        # The converted file is what gets embedded too, not just what the model reads — MarkNotes'
-        # ALLOWED_IMAGE_EXTENSIONS excludes exactly the same formats, so keeping the heic would
-        # leave a note whose embed the vault cannot render either.
+        # The converted file is what gets embedded too, not just what the model reads — MarkNotes
+        # renders exactly the same set, so an embedded heic would be a broken image in the vault.
         try:
             readable = await normalize(src, stage)
         except ImageError as exc:
+            # No renderable image exists, so there is nothing to embed and a note would be empty.
+            # File the original instead: permanent, so it replies and advances rather than defers.
             logger.warning("cannot normalize %s: %s", src.name, exc)
-            return _write(message, settings, src, description=None, reason=str(exc))
+            moved = move_to_downloads(src, downloads_dir=settings.downloads_dir)
+            return HandlerResult(reply=_undelivered_reply(src.name, str(exc), moved))
+
+        # Checked *after* conversion, because that is what gets embedded: a .heic passes this on
+        # its own size and then triples. Too big to embed = no note worth writing, so the original
+        # is filed like any other, and the owner is told where it went.
+        size = readable.stat().st_size
+        if size > _MAX_EMBED_BYTES:
+            reason = (
+                f"이미지가 너무 커서 노트에 넣지 못했습니다 "
+                f"({size / 1_000_000:.1f}MB, 최대 {_MAX_EMBED_BYTES / 1_000_000:.0f}MB)"
+            )
+            logger.info("image too large to embed: %s (%d bytes)", src.name, size)
+            moved = move_to_downloads(src, downloads_dir=settings.downloads_dir)
+            return HandlerResult(reply=_undelivered_reply(src.name, reason, moved))
 
         if not settings.claude_enabled:
             return _write(
@@ -224,33 +241,33 @@ def _write(
     reason: str | None,
     model_title: str | None = None,
 ) -> HandlerResult:
-    """Move the image into the vault and write the note that embeds it. Side effects live here."""
-    title = _title_for(message, model_title)
-    assets_dir = settings.assets_dir or (settings.inbox_dir.parent / ".assets")
+    """Write the note, with the image encoded into it. The only side effect in this handler.
 
-    # Name the image after the note it belongs to, so the two sort together in `.assets/`.
-    stem = build_filename(title, message.date, extension="").rstrip(".")
-    stored = move_into_assets(
-        image, assets_dir=assets_dir, filename=f"{stem}{image.suffix.lower()}"
-    )
+    Embedding rather than linking is what makes that true: there is no file to move, so a note
+    either exists complete or does not exist at all.
+    """
+    title = _title_for(message, model_title)
+    embed = f"![{slugify(title)}]({to_data_url(image)})"
+
+    extra: dict[str, object] = {"telegram_message_id": message.message_id}
+    # Only when the owner actually sent a named file: a Telegram photo has no name, and recording
+    # the temp file we invented for it would say nothing.
+    if message.file_name:
+        extra["original_file"] = message.file_name
 
     path = write_note(
         inbox_dir=settings.inbox_dir,
-        body=_body(embed_link(stored), description, reason),
+        body=_body(embed, description, reason),
         title=title,
         when=message.date,
         source="telegram",
         note_type="image",
         tags=[],
-        extra={
-            "telegram_message_id": message.message_id,
-            "original_file": message.file_name or stored.name,
-            "image": f".assets/{stored.name}",
-        },
+        extra=extra,
         slug_source=slugify(title),
     )
 
-    reply = f"🖼️ 저장됨: {path.name}\n📎 이미지: {stored.name}"
+    reply = f"🖼️ 저장됨: {path.name}"
     if reason:
         reply += f"\n⚠️ 설명 없이 저장했습니다 — {reason}"
-    return HandlerResult(reply=reply, saved_path=path, extra_paths=[stored])
+    return HandlerResult(reply=reply, saved_path=path)

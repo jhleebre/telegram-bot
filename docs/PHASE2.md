@@ -10,7 +10,7 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > *Increment 2 (as built)* (the file pipelines and the isolation the PDF route depends on) →
 > *Increment 3 (as built)* (images, and the format finding that route turns on) →
 > *Usage-limit policy* (binding on every later increment) → *Next up: increment 4*.
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **335 passing**, no network or model runs.
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **337 passing**, no network or model runs.
 
 **Ingestion recap (from the Phase 1 hybrid):** input files arrive via **Saved Messages** (Telethon)
 and are downloaded to a temp dir with `message.download_media(...)`. The **review conversation runs
@@ -241,7 +241,7 @@ document's own title, `##`/`###` structure, and rendered tables, faithfully.
 | Input | Output | Original file |
 |-------|--------|---------------|
 | Audio (m4a/wav/mp3/voice) | Meeting note (glossary-corrected, reviewed) → `0_inbox` | deleted after success |
-| **Image** (screen capture/photo) | ✅ **shipped** — description + OCR note, image embedded → `0_inbox` | **kept in the vault's `.assets/`** (embedded; heic/bmp → PNG first) |
+| **Image** (screen capture/photo) | ✅ **shipped** — description + OCR note → `0_inbox` | **encoded into the note itself** (base64; heic→jpeg, bmp→png first) — no separate file |
 | **PDF** | ✅ **shipped** — Markdown (Claude reads the PDF natively) → `0_inbox` | **moved to `~/Downloads/`** |
 | docx / pptx / xlsx / … | ✅ **shipped** — **out of scope by decision**: reply asking for a PDF export | — |
 | txt / csv | ✅ **shipped** — Markdown note (csv → table, rendered deterministically) → `0_inbox` | **moved to `~/Downloads/`** |
@@ -472,8 +472,9 @@ Suite: 171 → 270.
 Increment 3 adds `test_image_handler.py` (the happy path, the staging isolation, the `제목:` line and
 its fallbacks, every degradation path landing on a stub note that still embeds the image, and
 deferral-leaves-no-side-effect), `test_images.py` (format policy + real `sips` conversions),
-`test_downloads.py` (the extracted helper, incl. untrusted-filename traversal), plus `.assets` cases
-in `test_originals.py` and `test_config.py`. Suite: 270 → **335**.
+`test_downloads.py` (the extracted helper, incl. untrusted-filename traversal), and the
+`CLAUDE_IMAGE_MODEL` cases in `test_config.py`. The image tests assert the bytes **decoded back out
+of the note**, which is the only thing that proves the capture survived. Suite: 270 → **337**.
 
 ## Human-in-the-loop via session preservation
 
@@ -514,18 +515,19 @@ IDLE ──job needs review──▶ AWAITING_REVIEW ──owner reply (bot DM)�
 ## B. Image → described note (VLM via `claude -p`)
 
 - **Shipped in increment 3** (see *Increment 3 (as built)* for the measurements behind each choice).
-  The image is kept in the vault's **root `.assets/`** and embedded as `![…](.assets/<file>)`, above
-  a Claude-generated description + OCR, in `0_inbox`. No review loop.
+  The image is encoded **into the note itself** (`![…](data:image/jpeg;base64,…)`), above a
+  Claude-generated description + OCR, in `0_inbox`. No separate image file, and so nothing to keep
+  in sync with MarkNotes' `.assets/.metadata.json` ledger. No review loop.
 - **`heic`/`heif`/`bmp` are converted to PNG first** (`files/images.py`, via macOS `sips`) — `Read`
   hands those back as raw *bytes* without erroring, and the model will describe the file header and
   report success. This is not optional.
 
 ### Increment 3 (as built) — image → described note
 
-Delivered: `handlers/image_handler.py`, `files/images.py` (new — format normalization),
-`handlers/downloads.py` (new — the shared download helper, extracted from `document_handler`),
-`engine/prompts/image_describe.md`, `files/originals.move_into_assets` + `embed_link`, and the
-`ASSETS_DIR` / `CLAUDE_IMAGE_MODEL` settings. Suite: 270 → **335**.
+Delivered: `handlers/image_handler.py`, `files/images.py` (new — format normalization + inline
+embedding), `handlers/downloads.py` (new — the shared download helper, extracted from
+`document_handler`), `engine/prompts/image_describe.md`, and the `CLAUDE_IMAGE_MODEL` setting.
+Suite: 270 → **337**.
 
 **All four open decisions were settled by measurement before building.** Each is recorded below
 with what was measured, because three of the four came out against the expected answer.
@@ -540,14 +542,29 @@ actually sent — so the note is always written, always opens with the embed, an
 lost; only the searchable text is. This covers every non-limit path: engine error, the sentinel, an
 unconvertible file, an oversized file, and `CLAUDE_ENABLED=false`.
 
-**2. The image lives in the vault-root `.assets/`, embedded as `![…](.assets/<file>)`.** This was
-settled by reading MarkNotes' source rather than choosing: `ASSETS_PATH = <vault root>/.assets`, and
-an embed is resolved with `path.join(ROOT_PATH, imagePath)` and matched by the literal pattern
-`![alt](.assets/<file>)`. So the prefix **looks** note-relative but is **vault-root-anchored** —
-which settles the question the handoff raised, and settles it well: the embed keeps working after
-the owner triages the note out of `0_inbox` into `2_areas/…`. Note-adjacent would have broken on
-the first move. `assets_dir` is derived from the vault root (the inbox's parent — a relationship
-`config.load` already relies on), with `ASSETS_DIR` to override.
+**2. The image goes *inside* the note, base64-encoded: `![…](data:image/jpeg;base64,…)`.** The
+handoff framed this as "`.assets/` vs note-adjacent" — a false choice, because **MarkNotes supports
+a third form, and it is the right one for a bot.**
+
+The first attempt shipped the `.assets/` route and was **wrong in a way the tests could not see**
+(caught by the owner in review). Putting a file in `.assets/` is only half of that contract: the
+folder's **`.metadata.json` is a ledger** — `{images: {<file>: {references: [...], uploadedAt,
+size}}}` — that MarkNotes maintains to track which notes use which image and to clean up
+unreferenced ones. A bot writing files in behind the app's back leaves that ledger not knowing they
+exist. (`updateDocumentImageReferences` does self-heal on save, so it was recoverable — but
+depending on the app to repair the bot's mess is not a design.)
+
+The embedded form has **no such contract**: no file in `.assets/`, no metadata entry, nothing to
+keep in sync. A note the bot writes is complete and self-contained the moment it lands — which is
+exactly the property this bot wants, since it writes notes while the app is not looking. Verified
+against the shape MarkNotes itself produces (`![<stem>](data:image/jpeg;base64,…)`, standard
+Markdown), and round-tripped: the bytes decode back to the identical image.
+
+**What `.assets/` buys is deduplication** — one file shared by several notes — and the owner's call
+is that this vault is text-first and the reuse effectively never happens. Paying a ledger's
+complexity for a saving that does not materialize is the wrong trade. *(Consequence: `ASSETS_DIR`,
+`Settings.assets_dir`, `move_into_assets` and `embed_link` are all gone; the frontmatter carries no
+`image:` key, because there is no file to point at and a path there could only ever be a lie.)*
 
 **3. Image model: `sonnet` — the cheap default, measured, not assumed.** The handoff said *measure
 before defaulting to opus*, and the measurement came back clean: **5 of 5 runs** on a real Korean
@@ -566,32 +583,41 @@ hat: **the model describes what it can infer when it cannot see, and reports suc
 Pressed harder ("transcribe every line"), it did admit `READ_FAILED` — but the note would never have
 pressed. Measured against the real CLI:
 
-| Format | `Read` renders it? | MarkNotes embeds it? | Policy |
-|--------|--------------------|----------------------|--------|
-| `png` `jpg` `jpeg` `gif` `webp` | ✅ | ✅ | staged as-is — **never re-encoded** |
-| `heic` `heif` `bmp` | ❌ **silently returns bytes** | ❌ | **converted to PNG first** |
+| Format | `Read` renders it? | MarkNotes renders it? | Policy |
+|--------|--------------------|-----------------------|--------|
+| `png` `jpg` `jpeg` `gif` `webp` | ✅ | ✅ | embedded as-is — **never re-encoded** |
+| `heic` `heif` | ❌ **silently returns bytes** | ❌ | **→ JPEG** (a lossy photo stays lossy) |
+| `bmp` | ❌ **silently returns bytes** | ❌ | **→ PNG** (lossless screen content) |
 
 The two readers exclude the same formats, which is a useful coincidence: MarkNotes'
-`ALLOWED_IMAGE_EXTENSIONS` is `.jpg .jpeg .png .gif .svg .webp`. So the converted PNG is what the
-model reads **and** what the note embeds — keeping the `.heic` would have left a note whose embed
+`ALLOWED_IMAGE_EXTENSIONS` is `.jpg .jpeg .png .gif .svg .webp`. So the converted image is what the
+model reads **and** what the note embeds — keeping the `.heic` would have left a note whose image
 the vault could not render either. `files/images.py` does this with **`sips`** (ships with macOS; no
-new dependency, and the app is macOS-only already). The `.heic` is the realistic input: it is what
-an iPhone sends when the owner picks "send as file". `original_file` in the frontmatter still
-records the true origin (`IMG_4821.heic`).
+new dependency, and the app is macOS-only already). `original_file` in the frontmatter still records
+the true origin (`IMG_4821.heic`).
 
-**Size cap: 10MB** — MarkNotes' own `MAX_IMAGE_SIZE`. Far more generous than the document routes'
-2MB because the image is stored as a file and embedded *by reference*, so the note does not grow
-with it; past 10MB the vault refuses to embed it when exporting to PDF anyway. Oversized → kept and
-embedded, but not described.
+**The conversion target depends on the source, because the note now carries the bytes.** Measured on
+a 12MP photo: a 1.85MB `.heic` → an **18.3MB PNG** (a **24MB note**) but a **4.0MB JPEG** (a 5.3MB
+note). A camera photo is already lossy, so re-encoding it losslessly costs 10x and buys nothing; a
+`.bmp` is the opposite — uncompressed screen content, where PNG is lossless *and* smaller. The first
+draft converted everything to PNG, which was harmless when the image was a separate file and became
+a 24MB liability the moment it went inline.
+
+**Size cap: 10MB, applied *after* conversion** — MarkNotes' own `MAX_IMAGE_SIZE`, and base64
+inflates by a further ~4/3, so 10MB of image is a ~13MB note. Checking the *original's* size (as the
+first draft did) is meaningless: the `.heic` above passes at 1.85MB and then triples. Too big to
+embed means there is no note worth writing, so the original is filed to `~/Downloads/` and the reply
+says where it went — the same fallback as any other original.
 
 #### As built
 
 | Step | What happens |
 |------|--------------|
 | download | `handlers/downloads.download_attachment` into a temp dir |
-| normalize | `files/images.normalize` — PNG-convert only if unrenderable |
+| normalize | `files/images.normalize` — convert only if unrenderable (heic→jpeg, bmp→png) |
+| cap | >10MB after conversion → no note; original → `~/Downloads/` |
 | describe | one-shot `claude -p` on `claude_image_model`, staged alone (`cwd` + sole `--add-dir`) |
-| write | image → `.assets/`, note → `0_inbox`, **both after the LLM call** |
+| write | the note, with the image base64'd into it — **the only side effect, after the LLM call** |
 
 Points worth knowing before touching this:
 
@@ -609,8 +635,6 @@ Points worth knowing before touching this:
   60 characters long and cut off mid-word, with a filename to match. The model gives a title in the
   same call for free. A missing title line is not a failure — it falls back to the filename, then
   `이미지`, without discarding a perfectly good description.
-- **The image is renamed to the note's own `YYMMDD-HHMM-<slug>` stem** so a note and its image sort
-  together in `.assets/`; collisions get `-2`, `-3`, … as everywhere else.
 - **A Telegram *photo* carries no file name at all.** Telethon's `_get_proper_filename` appends the
   media's real extension when the target path has none (`if not ext: ext = extension`) and returns
   the adjusted path — which is why `download_attachment` must use the **returned** path, not the one
@@ -621,9 +645,8 @@ Points worth knowing before touching this:
   (`download_attachment` / `safe_name`), per the handoff. It lives under `handlers/` rather than
   `files/` because it takes an `IncomingMessage`, which keeps the `handlers → files` dependency
   direction intact. Increment 5 is the third caller.
-- **`Settings.assets_dir` is derived in `__post_init__`, not defaulted.** A static default would
-  point every hand-built `Settings` — i.e. every test fixture — at the **real vault**. Deriving it
-  from `inbox_dir.parent` means a temp inbox brings a temp `.assets` automatically.
+- **The note is the handler's only side effect**, which is what makes the deferral rule trivial
+  here: there is no file to move, so a note either exists complete or does not exist at all.
 
 **Verification status.** Driven for real, end-to-end through `handle_image` against the real
 `claude` binary and the real `sips`, on a real Korean screenshot: both the `.png` path and the
@@ -685,8 +708,9 @@ whole suite green, then a real-app run. **Stop for owner confirmation before inc
 
 ## Original-file policy (`files/originals.py`)
 
-Audio → delete after success · **Image → keep, moved into the vault's `.assets/` and embedded
-(`move_into_assets` + `embed_link`, increment 3)** · pdf/txt/csv → move to `~/Downloads/`
+Audio → delete after success · **Image → encoded into the note (`files/images.to_data_url`,
+increment 3); no original kept, and nothing for this module to do — unless it is too large to
+embed, which falls back to `~/Downloads/`** · pdf/txt/csv → move to `~/Downloads/`
 (`move_to_downloads`) · Markdown → save to inbox (it *is* the note).
 
 ## Open decisions

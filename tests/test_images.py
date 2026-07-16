@@ -7,6 +7,7 @@ our *assumptions* about `sips` rather than its behaviour. The conversions are sm
 """
 
 import asyncio
+import base64
 from pathlib import Path
 
 import pytest
@@ -14,8 +15,10 @@ import pytest
 from contextbot.files.images import (
     VISION_READABLE_EXTS,
     ImageError,
+    mime_type,
     needs_transcode,
     normalize,
+    to_data_url,
 )
 
 # A real 8x8 opaque RGB PNG. Not 1x1, and not RGBA: sips refuses to *write* a BMP from either
@@ -73,8 +76,13 @@ async def test_a_readable_image_is_returned_untouched(tmp_path: Path):
     assert await normalize(src, tmp_path) == src  # same path: not re-encoded, not copied
 
 
-async def test_heic_is_converted_to_a_real_png(tmp_path: Path):
-    """The iPhone case: what an owner sends when they pick 'send as file'."""
+async def test_heic_is_converted_to_a_real_jpeg(tmp_path: Path):
+    """The iPhone case: what an owner sends when they pick 'send as file'.
+
+    JPEG, not PNG, because the note *embeds* the result: measured on a 12MP photo, a 1.85MB heic
+    becomes an 18.3MB PNG (a 24MB note) but a 4.0MB JPEG. It is already a lossy camera photo, so
+    re-encoding it losslessly costs 10x and buys nothing.
+    """
     heic = await _to(tmp_path, _png(tmp_path), "heic", "IMG_4821.heic")
     assert heic.is_file()  # guard: the fixture itself is real
 
@@ -82,11 +90,13 @@ async def test_heic_is_converted_to_a_real_png(tmp_path: Path):
     out.mkdir()
     result = await normalize(heic, out)
 
-    assert result == out / "IMG_4821.png"
-    assert result.read_bytes().startswith(b"\x89PNG")  # a genuine PNG, not a renamed heic
+    assert result == out / "IMG_4821.jpg"
+    assert result.read_bytes().startswith(b"\xff\xd8\xff")  # a genuine JPEG, not a renamed heic
 
 
-async def test_bmp_is_converted(tmp_path: Path):
+async def test_bmp_is_converted_to_png(tmp_path: Path):
+    """The opposite case from a photo: uncompressed screen content, where PNG is lossless *and*
+    smaller than the source."""
     bmp = await _to(tmp_path, _png(tmp_path), "bmp", "scan.bmp")
     out = tmp_path / "out"
     out.mkdir()
@@ -95,6 +105,33 @@ async def test_bmp_is_converted(tmp_path: Path):
 
     assert result == out / "scan.png"
     assert result.read_bytes().startswith(b"\x89PNG")
+
+
+# ------------------------------------------------------------------ embedding
+def test_to_data_url_round_trips_the_bytes(tmp_path: Path):
+    src = _png(tmp_path)
+
+    url = to_data_url(src)
+
+    assert url.startswith("data:image/png;base64,")
+    assert base64.b64decode(url.split(",", 1)[1]) == _PNG_8X8
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("a.png", "image/png"),
+        ("a.jpg", "image/jpeg"),
+        ("a.jpeg", "image/jpeg"),
+        ("a.JPG", "image/jpeg"),
+        ("a.gif", "image/gif"),
+        ("a.webp", "image/webp"),
+        ("a.svg", "image/svg+xml"),
+    ],
+)
+def test_mime_types_match_marknotes(name, expected):
+    """The data URL declares the type MarkNotes renders by, so this mirrors its getImageMimeType."""
+    assert mime_type(Path(name)) == expected
 
 
 async def test_a_corrupt_image_raises_rather_than_producing_nothing(tmp_path: Path):
