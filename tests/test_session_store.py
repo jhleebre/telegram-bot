@@ -23,14 +23,33 @@ def store(tmp_path) -> SessionStore:
     return SessionStore(tmp_path / "reviews")
 
 
-def make(store: SessionStore, *, message_id: int = 7, created_at=NOW) -> PendingReview:
-    return store.create(
+def make(
+    store: SessionStore,
+    *,
+    message_id: int = 7,
+    created_at=NOW,
+    session_id: str = "sess-1",
+    state: ReviewState = ReviewState.AWAITING_REVIEW,
+    note_type: str = "note",
+) -> PendingReview:
+    """A review in the store.
+
+    ``create`` always makes one QUEUED — the producer activates it once a draft exists — so this
+    defaults to *asked about*, which is the state the tests below are mostly about. Pass
+    ``state=ReviewState.QUEUED`` for one still waiting its turn.
+    """
+    review = store.create(
         message_id=message_id,
-        session_id="sess-1",
+        session_id=session_id,
         title="검토 중",
         source_date=NOW,
         created_at=created_at,
+        note_type=note_type,
     )
+    if state is not ReviewState.QUEUED:
+        review.state = state
+        store.update(review)
+    return review
 
 
 def test_no_pending_review_initially(store):
@@ -126,9 +145,7 @@ def test_created_at_and_source_date_are_distinct(store):
     let a bot-DM message sent in that gap be read as an answer.
     """
     started = NOW + timedelta(hours=3)
-    review = store.create(
-        message_id=7, session_id="s", title="t", source_date=NOW, created_at=started
-    )
+    review = make(store, created_at=started)
 
     assert review.source_date == NOW
     assert review.created_at == started

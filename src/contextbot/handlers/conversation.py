@@ -31,6 +31,7 @@ from pathlib import Path
 from ..config import Settings
 from ..core.session_store import PendingReview, ReviewState, SessionStore, build_store
 from ..engine import prompts
+from ..files.glossary import GlossaryEntry, append_entries, parse_entries
 from ..engine.claude_cli import (
     ClaudeCLI,
     ClaudeError,
@@ -48,6 +49,7 @@ logger = logging.getLogger("contextbot.handlers.conversation")
 REVIEW_PREFIX = "#검토"
 
 QUESTIONS_HEADING = "## 확인 요청"
+_TAGS_PREFIX = "태그:"
 _SENTINEL = "DRAFT_FAILED"
 _MIN_OUTPUT_CHARS = 20
 _REVIEW_TIMEOUT_SEC = 120.0
@@ -69,6 +71,11 @@ _ELIDED = "\n…(생략 — 전체 내용은 저장할 때 노트에 들어갑�
 
 _ACCEPT = {"확인", "ok", "okay", "예", "네", "저장", "좋아요", "승인"}
 _CANCEL = {"취소", "cancel", "그만", "중단"}
+
+# The vault's own convention, read off the vault rather than chosen: 35 notes carry
+# `type: meeting-note` and none carry `type: meeting`. Only these reviews have a transcript behind
+# them, so only these have anything to teach the glossary.
+_MEETING_TYPE = "meeting-note"
 
 _SYSTEM_PROMPT = (
     "You are a note editor for a personal knowledge base. You organise what the author gives you "
@@ -169,11 +176,33 @@ def review_block(review: PendingReview) -> str:
 
 
 # ------------------------------------------------------------------- writing notes
-def _write(review: PendingReview, settings: Settings, *, unreviewed: str | None = None) -> Path:
-    """Write the draft as a note. The only side effect in this module, and always last.
+def split_tags(body: str) -> tuple[list[str], str]:
+    """Pull a `태그:` line off the front of a draft body; return (tags, body).
 
-    ``unreviewed`` marks a draft the owner never accepted, so it can never be mistaken for one
-    they did.
+    Applied on **every** turn, not just the producer's, and that is the point. Turn 1's prompt asks
+    for the line; `review_revise.md` says "output the note in the same structure as before", so a
+    revision reproduces it — and without this the line would land in the note body as literal text
+    (`태그: 에이닷, B2B` as the note's first line). That is increment 4's body-corruption bug exactly:
+    nothing raises, the suite stays green, and the note is quietly wrong.
+
+    An absent line is normal, not a failure — it just means no tags this turn.
+    """
+    stripped = body.lstrip()
+    first, _, rest = stripped.partition("\n")
+    if not first.strip().startswith(_TAGS_PREFIX):
+        return [], body
+    raw = first.strip()[len(_TAGS_PREFIX) :]
+    tags = [t.strip().lstrip("#") for t in raw.split(",")]
+    return [t for t in tags if t], rest.strip()
+
+
+def _write(review: PendingReview, settings: Settings, *, unreviewed: str | None = None) -> Path:
+    """Write the draft as a note. ``unreviewed`` marks one the owner never accepted.
+
+    ``note_type`` and ``tags`` come off the *review*, not from here. They were hardcoded to
+    ``"note"`` / ``[]`` while `#검토` was the only producer, which was the memo's answer smuggled
+    into shared code — a meeting note would have landed as `type: note`, and nothing would have
+    failed to say so.
     """
     body = review.draft
     if unreviewed:
@@ -187,8 +216,8 @@ def _write(review: PendingReview, settings: Settings, *, unreviewed: str | None 
         title=review.title,
         when=review.source_date,
         source="telegram",
-        note_type="note",
-        tags=[],
+        note_type=review.note_type,
+        tags=review.tags,
         extra={"telegram_message_id": review.message_id, "reviewed": unreviewed is None},
         slug_source=review.title,
     )
@@ -235,21 +264,65 @@ def discard_incomplete(store: SessionStore) -> bool:
     ``확인`` and ``취소`` — with "잠시 후 다시 보내주세요" until the expiry fired, so the owner could
     not even rescue their own draft. The draft is intact, so the review is resumable; only the
     in-flight claim is stale.
+
+    Both rules apply to a **queued** review too, not only the answerable one: a crash during a
+    queued job's draft turn leaves exactly the same draftless entry, and keeping it would hold a
+    place in the queue for a note that does not exist.
     """
-    review = store.pending()
-    if review is None:
-        return False
+    dropped = False
+    for review in store.all_reviews():
+        if not review.draft_path.exists():
+            logger.info("discarding review %s: its first turn never finished", review.message_id)
+            store.remove(review.message_id)
+            dropped = True
+            continue
 
-    if not review.draft_path.exists():
-        logger.info("discarding review %s: its first turn never finished", review.message_id)
-        store.remove(review.message_id)
-        return True
+        if review.state is ReviewState.FINALIZING:
+            logger.info("review %s: clearing a turn that died with the app", review.message_id)
+            review.state = ReviewState.AWAITING_REVIEW
+            store.update(review)
+    return dropped
 
-    if review.state is ReviewState.FINALIZING:
-        logger.info("review %s: clearing a turn that died with the app", review.message_id)
-        review.state = ReviewState.AWAITING_REVIEW
-        store.update(review)
-    return False
+
+# ---------------------------------------------------------------------- the queue
+def activate(review: PendingReview, store: SessionStore) -> str:
+    """Ask the owner about a drafted review, and start its clock. Returns the DM to send.
+
+    The clock starts **here**, when the owner is actually asked — not when the work began. For audio
+    that gap is minutes of Whisper plus a drafting turn, and for a queued review it can be however
+    long the review ahead of it took. ``created_at`` gates the poller's backlog filter, so anything
+    typed at the bot before this moment predates the question and cannot be an answer to it; stamped
+    any earlier, an unrelated message would sail through and be applied as a correction.
+    """
+    review.state = ReviewState.AWAITING_REVIEW
+    review.created_at = datetime.now(timezone.utc)
+    store.update(review)
+    return review_block(review)
+
+
+def promote_next(store: SessionStore) -> str | None:
+    """Ask about the oldest queued review, if nothing else is being asked about. Returns the DM.
+
+    **This cannot fail, and that is the whole reason the queue is shaped this way.** Everything
+    expensive — the download, Whisper, the drafting turn — already happened in the capture handler,
+    where ``DeferMessage`` is legal and there is a handler on the stack to replay. Promotion is a
+    timestamp and a message. The alternative (draft it *when its turn comes*) would run an engine
+    call from a background task with no handler to replay, and would need its own retry driver, its
+    own give-up counter, and its own answer for a usage limit — a second state machine beside the
+    one this module already is.
+    """
+    if store.has_pending():
+        return None
+    queue = store.queued()
+    if not queue:
+        return None
+    review = queue[0]
+    waiting = len(queue) - 1
+    logger.info("promoting queued review %s (%d still waiting)", review.message_id, waiting)
+    header = "🎙 다음 회의록 차례입니다."
+    if waiting:
+        header += f" (뒤에 {waiting}건 더 대기 중)"
+    return f"{header}\n\n{activate(review, store)}"
 
 
 # ------------------------------------------------------------------ starting one
@@ -331,16 +404,9 @@ async def handle_review_request(
     review.title = title or "검토 노트"
     review.questions = questions
     review.write_draft(body)
-    # The clock starts when the owner is *asked*, not when we started working. It was stamped at
-    # store.create() because the record needed one, but the draft turn sits in between — ~60s for a
-    # memo, minutes for audio once Whisper is in the path. created_at gates the poller's backlog
-    # filter, so anything the owner typed at the bot while we were drafting predates the question
-    # and cannot be an answer to it; left as-is it would sail through and be applied as a
-    # correction. Expiry reads better this way too: the 24h is time the *owner* left it unanswered.
-    review.created_at = datetime.now(timezone.utc)
-    store.update(review)
-
-    return HandlerResult(reply=review_block(review))
+    # `activate` flips it out of QUEUED and stamps the clock at the moment the owner is asked (see
+    # there). A memo is never queued: the guard above bounced it, because re-sending a memo is free.
+    return HandlerResult(reply=activate(review, store))
 
 
 def _plain_note(message: IncomingMessage, settings: Settings, text: str, reason: str) -> HandlerResult:
@@ -395,13 +461,80 @@ async def handle_reply(
         )
 
     if lowered in _ACCEPT:
-        # Accepting needs no engine call: the draft on disk *is* what the owner just approved.
-        path = _write(review, settings)
-        store.remove(review.message_id)
-        logger.info("review %s accepted: %s", review.message_id, path.name)
-        return f"✅ 저장됨: {path.name}"
+        return await _accept(review, settings, store=store, engine=engine)
 
     return await _revise(review, text, settings, store=store, engine=engine)
+
+
+async def _accept(
+    review: PendingReview,
+    settings: Settings,
+    *,
+    store: SessionStore,
+    engine: ClaudeCLI | None,
+) -> str:
+    """The owner said yes: write the note, file what the review taught us, end the review.
+
+    Increment 4's accept was one line — the draft on disk *is* what they approved, so no engine call
+    was needed. Increment 5 makes "success" mean two more things, and both land here:
+
+    - **the glossary** learns the mis-transcriptions this review confirmed, and
+    - **the audio is deleted**, which happens for free: it lives in the review's tree, and
+      ``store.remove`` drops that tree.
+
+    The order is the whole safety argument. The glossary turn is an engine call, so it goes
+    **first**, and every side effect follows it — the same rule the capture handlers hold, applying
+    one last time at the end of a review rather than the start of a job.
+
+    **Nothing here may cost the owner their note.** They said 확인; the note is the deliverable, and
+    a glossary that could not be updated is a footnote. So the note is written whatever the glossary
+    turn does, and the failure is reported rather than raised.
+    """
+    terms: list[GlossaryEntry] = []
+    glossary_note = ""
+    if review.note_type == _MEETING_TYPE and settings.claude_enabled:
+        try:
+            terms = await _confirmed_terms(review, settings, engine=engine)
+        except ClaudeError as exc:
+            # Every reason to be here is survivable: a usage limit, a lost session, a timeout. None
+            # of them is a reason to withhold the note the owner just approved.
+            logger.warning("glossary turn failed for review %s: %s", review.message_id, exc)
+            glossary_note = f"\n⚠️ 용어집은 갱신하지 못했습니다 — {exc}"
+
+    # Everything below is a side effect, so nothing above it may be one.
+    path = _write(review, settings)
+    if terms:
+        added = append_entries(settings.glossary_path, terms)
+        if added:
+            glossary_note = "\n📖 용어집에 추가: " + ", ".join(
+                f"{e.transcribed} → {e.correct}" for e in added
+            )
+    store.remove(review.message_id)  # takes the review's tree, and the audio in it, with it
+    logger.info("review %s accepted: %s", review.message_id, path.name)
+    return f"✅ 저장됨: {path.name}{glossary_note}"
+
+
+async def _confirmed_terms(
+    review: PendingReview, settings: Settings, *, engine: ClaudeCLI | None
+) -> list[GlossaryEntry]:
+    """Resume the session once and ask what this review settled about the recogniser.
+
+    Only the conversation knows. The model proposed the corrections, the owner accepted some and
+    overrode others, and the difference is not derivable from the note — which is why turn 1's
+    *proposals* are not stored and appended instead: a proposal the owner corrected would then be
+    filed as though confirmed, silently mis-correcting every future meeting note. A wrong glossary
+    entry is worse than no glossary at all.
+    """
+    engine = engine or build_engine(settings)
+    result = await engine.run(
+        prompts.render("meeting_glossary"),
+        system_prompt=_SYSTEM_PROMPT,
+        resume=review.session_id,
+        add_dirs=[review.work_dir],
+        cwd=review.work_dir,
+        timeout_sec=max(settings.claude_timeout_sec, _REVIEW_TIMEOUT_SEC),
+    )
+    return parse_entries(result.text)
 
 
 async def _revise(
@@ -463,6 +596,11 @@ async def _revise(
     title, body, questions = parse_draft(result.text)
     if title:
         review.title = title
+    # `review_revise.md` asks for the note "in the same structure as before", so a revision of a
+    # meeting note reproduces the 태그: line. Strip it here or it becomes the note body's first line.
+    tags, body = split_tags(body)
+    if tags:
+        review.tags = tags
     review.questions = questions
     review.write_draft(body)
     review.failures = 0

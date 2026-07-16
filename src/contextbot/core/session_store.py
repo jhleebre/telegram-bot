@@ -31,7 +31,7 @@ import logging
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -50,6 +50,9 @@ def _aware(value: datetime) -> datetime:
 class ReviewState(str, Enum):
     """Where a review is in its lifecycle. ``IDLE`` is represented by absence from the store."""
 
+    # Drafted but **not yet asked about**: waiting its turn behind another review, or still being
+    # drafted. The owner has seen nothing, so nothing they say can be an answer to it. Increment 5.
+    QUEUED = "queued"
     AWAITING_REVIEW = "awaiting_review"
     # A turn is in flight. Guards against a second reply arriving mid-turn and resuming the same
     # session twice — the CLI would be running two writers over one transcript.
@@ -81,6 +84,32 @@ class PendingReview:
     # its draft rather than sitting in AWAITING_REVIEW forever.
     failures: int = 0
     questions: str = ""
+    # What the finished note is. Increment 4 hardcoded `note_type="note"` and `tags=[]` in `_write`
+    # — the memo's answer smuggled into shared code. A meeting note is `meeting-note` (the vault's
+    # own convention: 35 notes carry it, none carry `meeting`), so the *producer* has to own both.
+    # The trap is that nothing fails if it does not: the note just lands with the wrong `type:` in
+    # its frontmatter, and only a reader who looks will ever notice.
+    note_type: str = "note"
+    tags: list[str] = field(default_factory=list)
+
+    @property
+    def review_dir(self) -> Path:
+        """The review's own tree. Everything under it dies when the review ends."""
+        return self.work_dir.parent
+
+    @property
+    def audio_dir(self) -> Path:
+        """Where a media original waits out the review.
+
+        Inside the review's tree but **outside `work_dir`**, beside the draft, for two reasons that
+        both matter. It must die with the review — and it does, because `remove()` drops the whole
+        tree, which is what makes "delete the audio on success" a thing that *happens* rather than a
+        thing someone has to remember. And it must stay out of the model's sight: `work_dir` is the
+        cwd and the sole `--add-dir`, so an `.m4a` sitting in it is a file `Read` would hand back as
+        raw bytes — the increment-3 `.heic` trap, where the model describes the header and reports
+        success. The model has the transcript; it has no use for the audio it cannot hear.
+        """
+        return self.review_dir / "audio"
 
     @property
     def draft(self) -> str:
@@ -111,6 +140,8 @@ class PendingReview:
             "state": self.state.value,
             "failures": self.failures,
             "questions": self.questions,
+            "note_type": self.note_type,
+            "tags": list(self.tags),
         }
 
     @classmethod
@@ -126,17 +157,28 @@ class PendingReview:
             state=ReviewState(data.get("state") or ReviewState.AWAITING_REVIEW.value),
             failures=int(data.get("failures") or 0),
             questions=str(data.get("questions") or ""),
+            # Every optional field defaults, so widening the persisted schema costs nothing: a
+            # review written by the previous version still loads.
+            note_type=str(data.get("note_type") or "note"),
+            tags=list(data.get("tags") or []),
         )
 
 
 class SessionStore:
-    """The pending reviews and the bot-DM update offset, persisted under ``state/reviews/``.
+    """The reviews and the bot-DM update offset, persisted under ``state/reviews/``.
 
-    **At most one review is active at a time** (:meth:`pending`). That is a deliberate constraint,
-    not a missing feature: with two reviews open, a bare "확인" in the bot DM cannot be attributed
-    to one of them, and guessing would silently apply the owner's answer to the wrong draft. See
-    docs/PHASE2.md — increment 5 is where a queue gets designed, with real audio ergonomics to
-    design it against.
+    **At most one review is ever *asked about*** (:meth:`pending`), and that constraint is
+    unchanged from increment 4: with two open, a bare "확인" in the bot DM cannot be attributed to
+    one of them, and guessing would silently apply the owner's answer to the wrong draft.
+
+    **Increment 5 adds a queue rather than relaxing it.** A memo bouncing off "one at a time" cost a
+    re-send; an audio file bouncing off it would cost a re-upload *and* a whole Whisper run. So a
+    review that arrives while another is being asked about is drafted anyway and parked in
+    :attr:`ReviewState.QUEUED` — the expensive work is already done and kept, and only the *asking*
+    waits. Promotion is then a timestamp and a DM: it makes no engine call and cannot fail.
+
+    So the store holds many reviews but at most one answerable one, which is the distinction every
+    method here turns on.
     """
 
     def __init__(self, root: Path):
@@ -172,17 +214,41 @@ class SessionStore:
             raise
 
     # --------------------------------------------------------------------- access
-    def pending(self) -> PendingReview | None:
-        """The active review, or None. Malformed entries are dropped rather than raising."""
+    def all_reviews(self) -> list[PendingReview]:
+        """Every review on disk, oldest first. Malformed entries are dropped rather than raising."""
+        reviews: list[PendingReview] = []
         for entry in self._load()["reviews"]:
             try:
-                return PendingReview.from_json(entry)
+                reviews.append(PendingReview.from_json(entry))
             except (KeyError, ValueError, TypeError):
                 logger.warning("dropping unreadable review entry: %r", entry)
+        return reviews
+
+    def pending(self) -> PendingReview | None:
+        """The review the owner has been **asked** about, or None.
+
+        A ``QUEUED`` review is deliberately invisible here, and that is what makes the queue safe:
+        the owner has not seen it, so nothing they type can be an answer to it. It is also what
+        keeps a review that is still *being drafted* from taking a reply meant for something else —
+        turn 1 creates the entry queued and only activates it once there is a draft to show.
+        """
+        for review in self.all_reviews():
+            if review.state is not ReviewState.QUEUED:
+                return review
         return None
 
     def has_pending(self) -> bool:
         return self.pending() is not None
+
+    def queued(self) -> list[PendingReview]:
+        """Reviews drafted and waiting their turn to be asked about, oldest first."""
+        return [r for r in self.all_reviews() if r.state is ReviewState.QUEUED]
+
+    def get(self, message_id: int) -> PendingReview | None:
+        for review in self.all_reviews():
+            if review.message_id == message_id:
+                return review
+        return None
 
     def create(
         self,
@@ -192,6 +258,7 @@ class SessionStore:
         title: str,
         source_date: datetime,
         created_at: datetime | None = None,
+        note_type: str = "note",
     ) -> PendingReview:
         """Reserve a review: make its stable directories and record the resume handle.
 
@@ -199,6 +266,11 @@ class SessionStore:
         that call dies partway. ``work_dir`` is the session's cwd and is deliberately left *empty*
         — the isolation rule from increments 2-3 still binds, so a job that reads a file stages it
         there alone. The draft lives one level up, outside the cwd, where the model cannot see it.
+
+        It is created **QUEUED**, always, and the producer activates it once a draft exists. That
+        ordering is not bookkeeping: a review created answerable would be visible to :meth:`pending`
+        for the whole drafting turn — minutes, for audio — so a reply that arrived meanwhile would
+        be routed into a review with no draft, answering a question nobody had been asked.
         """
         base = self._root / str(message_id)
         work_dir = base / "work"
@@ -211,17 +283,28 @@ class SessionStore:
             title=title,
             created_at=_aware(created_at or datetime.now(timezone.utc)),
             source_date=source_date,
+            state=ReviewState.QUEUED,
+            note_type=note_type,
         )
-        data = self._load()
-        data["reviews"] = [review.to_json()]
-        self._save(data)
+        self._put(review)
         logger.info("review %s created (session=%s)", message_id, session_id)
         return review
 
     def update(self, review: PendingReview) -> None:
-        """Persist a mutated review (state, failure count, title)."""
+        """Persist a mutated review (state, failure count, title, tags)."""
+        self._put(review)
+
+    def _put(self, review: PendingReview) -> None:
+        """Insert or replace one review, leaving every other entry alone.
+
+        Increment 4 wrote ``data["reviews"] = [review]`` here, which was correct while exactly one
+        review could exist and is a silent eraser now: saving the active review would drop the whole
+        queue on the floor, and nothing would raise.
+        """
         data = self._load()
-        data["reviews"] = [review.to_json()]
+        entries = [e for e in data["reviews"] if str(e.get("message_id")) != str(review.message_id)]
+        entries.append(review.to_json())
+        data["reviews"] = entries
         self._save(data)
 
     def remove(self, message_id: int) -> None:

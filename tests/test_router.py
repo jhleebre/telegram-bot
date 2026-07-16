@@ -80,12 +80,16 @@ async def test_route_text_writes_note(settings):
     assert result.saved_path.exists()
 
 
-async def test_route_audio_is_stub(settings):
+async def test_route_audio_reaches_the_meeting_pipeline(settings, fake_stt):
+    """Audio is no longer a stub (increment 5). With the engine off there is no meeting note to
+    make, but STT is local — so the transcript is saved rather than the recording lost."""
     msg = build_incoming_message(voice_message(21))
+
     result = await route(msg, settings)
-    assert result.saved_path is None
-    assert "Phase 2" in result.reply
-    assert not list(settings.inbox_dir.iterdir())
+
+    assert result.saved_path is not None
+    assert len(fake_stt) == 1
+    assert "전사 원문" in result.reply
 
 
 async def test_route_markdown_saves_the_file(settings):

@@ -24,13 +24,16 @@ from contextbot.engine.claude_cli import (
 from contextbot.handlers.base import DeferMessage, IncomingMessage, MessageKind
 from contextbot.handlers.conversation import (
     QUESTIONS_HEADING,
+    activate,
     discard_incomplete,
     expire_stale,
     handle_reply,
     handle_review_request,
     is_review_request,
     parse_draft,
+    promote_next,
     review_block,
+    split_tags,
 )
 
 DATE = datetime(2026, 7, 15, 14, 30, tzinfo=timezone.utc)
@@ -384,6 +387,7 @@ def test_discard_incomplete_drops_a_review_whose_first_turn_never_finished(store
 def test_discard_incomplete_keeps_a_live_review(store):
     review = store.create(message_id=7, session_id="s", title="t", source_date=DATE)
     review.write_draft("실제 초안")
+    activate(review, store)
 
     assert discard_incomplete(store) is False
     assert store.has_pending() is True
@@ -394,9 +398,31 @@ def test_discard_incomplete_keeps_a_review_whose_draft_is_legitimately_empty(sto
     body is still a live review, and the owner has already been asked about it."""
     review = store.create(message_id=7, session_id="s", title="t", source_date=DATE)
     review.write_draft("")
+    activate(review, store)
 
     assert discard_incomplete(store) is False
     assert store.has_pending() is True
+
+
+def test_discard_incomplete_drops_a_queued_review_that_never_got_a_draft(store):
+    """The queue needs the same rule, for the same reason.
+
+    A crash during a *queued* job's draft turn leaves the identical draftless entry — and keeping it
+    would hold a place in the queue for a note that does not exist, so the promotion after the
+    current review ends would announce a meeting note with nothing in it.
+    """
+    store.create(message_id=7, session_id="s", title="회의록 작성 중", source_date=DATE)
+
+    assert discard_incomplete(store) is True
+    assert store.queued() == []
+
+
+def test_discard_incomplete_keeps_a_queued_review_that_has_its_draft(store):
+    review = store.create(message_id=7, session_id="s", title="t", source_date=DATE)
+    review.write_draft("초안")
+
+    assert discard_incomplete(store) is False
+    assert [r.message_id for r in store.queued()] == [7]
 
 
 def test_discard_incomplete_with_no_review_is_a_no_op(store):
@@ -711,3 +737,279 @@ async def test_the_expiry_window_is_configurable(live, store):
     later = store.pending().created_at + timedelta(hours=2)
 
     assert await expire_stale(short, store=store, now=later) is not None
+
+
+# ------------------------------------------------- increment 5: tags in the draft
+def test_split_tags_pulls_the_line_off_the_body():
+    tags, body = split_tags("태그: 인프라, 예산, 3분기-계획\n\n## Overview\n\n내용")
+
+    assert tags == ["인프라", "예산", "3분기-계획"]
+    assert body == "## Overview\n\n내용"
+
+
+def test_split_tags_tolerates_a_body_without_one():
+    """A memo review has no tags line, and a model that forgets it has not failed."""
+    assert split_tags("## Overview\n\n내용") == ([], "## Overview\n\n내용")
+
+
+def test_split_tags_strips_a_stray_hash():
+    assert split_tags("태그: #에이닷, #B2B\n\n본문")[0] == ["에이닷", "B2B"]
+
+
+def test_split_tags_ignores_empty_entries():
+    assert split_tags("태그: 인프라, , 예산\n\n본문")[0] == ["인프라", "예산"]
+
+
+async def test_a_revision_does_not_leave_the_tags_line_in_the_note_body(live, store):
+    """The body-corruption bug, pre-empted.
+
+    `review_revise.md` asks for the note "in the same structure as before", so a revision of a
+    meeting note reproduces its `태그:` line — and without the strip, that line lands as the note
+    body's first line. Nothing raises; the note is just quietly wrong.
+    """
+    await _open_review(live, store)
+    review = store.pending()
+    review.note_type = "meeting-note"
+    store.update(review)
+    revised = f"제목: 회의\n태그: 인프라, 예산\n\n## Overview\n\n본문입니다.\n\n{QUESTIONS_HEADING}\n\n- (없음)\n"
+
+    await handle_reply("고쳐주세요", live, store=store, engine=FakeEngine(ClaudeResult(text=revised)))
+
+    assert store.pending().draft.startswith("## Overview")
+    assert "태그:" not in store.pending().draft
+    assert store.pending().tags == ["인프라", "예산"]
+
+
+# --------------------------------------------------------- increment 5: the queue
+def _queued(store, message_id: int, *, title: str = "대기 중인 회의록"):
+    review = store.create(
+        message_id=message_id, session_id=f"s-{message_id}", title=title, source_date=DATE,
+        note_type="meeting-note",
+    )
+    review.write_draft("## Overview\n\n대기 중인 초안입니다.")
+    store.update(review)
+    return review
+
+
+async def test_promote_next_asks_about_the_oldest_queued_review(live, store):
+    _queued(store, 8, title="첫 번째 회의")
+    _queued(store, 9, title="두 번째 회의")
+
+    reply = promote_next(store)
+
+    assert "첫 번째 회의" in reply
+    assert store.pending().message_id == 8
+    assert [r.message_id for r in store.queued()] == [9]
+
+
+def test_promote_next_says_how_many_are_still_waiting(store):
+    _queued(store, 8)
+    _queued(store, 9)
+
+    assert "뒤에 1건 더 대기" in promote_next(store)
+
+
+def test_promote_next_does_nothing_while_a_review_is_open(live, store):
+    review = store.create(message_id=7, session_id="s", title="진행 중", source_date=DATE)
+    review.write_draft("초안")
+    activate(review, store)
+    _queued(store, 8)
+
+    assert promote_next(store) is None
+    assert store.pending().message_id == 7
+
+
+def test_promote_next_with_an_empty_queue_is_a_no_op(store):
+    assert promote_next(store) is None
+
+
+def test_promotion_starts_the_clock_when_the_owner_is_asked(store):
+    """A queued review may wait an hour behind another one.
+
+    `created_at` gates the poller's backlog filter, so it has to mean "when they were asked" — not
+    when the recording arrived, and not when the draft was made. Stamped any earlier, anything the
+    owner typed at the bot while waiting would sail through the filter and be applied to this draft
+    as a correction.
+    """
+    review = _queued(store, 8)
+    stamped_at_create = review.created_at
+
+    promote_next(store)
+
+    assert store.pending().created_at > stamped_at_create
+
+
+def test_promotion_makes_no_engine_call(store):
+    """The property the whole queue design rests on: promotion cannot fail.
+
+    It runs from a poller background task where there is no handler to replay and no DeferMessage
+    to raise, so an engine call here would need its own retry driver and its own give-up counter.
+    The draft already exists; promotion is a timestamp and a message. (Enforced by signature: there
+    is no engine to pass it.)
+    """
+    _queued(store, 8)
+
+    reply = promote_next(store)
+
+    assert reply is not None
+    assert store.pending().draft.startswith("## Overview")
+
+
+# ------------------------------- increment 5: what accepting means for a meeting
+GLOSSARY_REPLY = """| 전사 표현 | 정확한 표현 | 유형 | 설명 |
+|---|---|---|---|
+| 팀웹 | T-map | 제품명 | SKT 내비게이션 |
+"""
+
+
+async def _open_meeting(live, store, *, message_id: int = 7):
+    """A meeting review, asked about, with its audio staged where a real one would put it."""
+    review = store.create(
+        message_id=message_id, session_id="sess-m", title="3분기 회의", source_date=DATE,
+        note_type="meeting-note",
+    )
+    review.write_draft("## Overview\n\n예산을 10-20% 줄이기로 했다.")
+    review.tags = ["인프라", "예산"]
+    review.audio_dir.mkdir(parents=True, exist_ok=True)
+    (review.audio_dir / "meeting.m4a").write_bytes(b"audio")
+    activate(review, store)
+    return review
+
+
+async def test_accepting_a_meeting_files_the_confirmed_terms(live, store):
+    review = await _open_meeting(live, store)
+    engine = FakeEngine(ClaudeResult(text=GLOSSARY_REPLY))
+
+    reply = await handle_reply("확인", live, store=store, engine=engine)
+
+    assert "저장됨" in reply
+    assert "팀웹 → T-map" in reply
+    assert "| 팀웹 | T-map | 제품명 | SKT 내비게이션 |" in live.glossary_path.read_text(encoding="utf-8")
+
+
+async def test_the_glossary_turn_resumes_the_same_session(live, store):
+    """Only the conversation knows which corrections the owner actually confirmed."""
+    review = await _open_meeting(live, store)
+    engine = FakeEngine(ClaudeResult(text="NONE"))
+
+    await handle_reply("확인", live, store=store, engine=engine)
+
+    assert engine.calls[0]["resume"] == "sess-m"
+
+
+async def test_accepting_writes_the_meeting_note_with_its_type_and_tags(live, store):
+    await _open_meeting(live, store)
+
+    await handle_reply("확인", live, store=store, engine=FakeEngine(ClaudeResult(text="NONE")))
+
+    frontmatter, _ = note_data(live)
+    assert frontmatter["type"] == "meeting-note"
+    assert frontmatter["tags"] == ["인프라", "예산"]
+    assert frontmatter["reviewed"] is True
+
+
+async def test_accepting_deletes_the_audio(live, store):
+    """"Success" now means the recording is gone — and it happens for free, because the audio lives
+    in the review's tree and ending a review drops the tree. Nothing has to remember to do it."""
+    review = await _open_meeting(live, store)
+    assert (review.audio_dir / "meeting.m4a").is_file()
+
+    await handle_reply("확인", live, store=store, engine=FakeEngine(ClaudeResult(text="NONE")))
+
+    assert not review.audio_dir.exists()
+    assert not review.review_dir.exists()
+
+
+async def test_cancelling_deletes_the_audio_too(live, store):
+    review = await _open_meeting(live, store)
+
+    await handle_reply("취소", live, store=store, engine=FakeEngine())
+
+    assert not review.review_dir.exists()
+
+
+async def test_a_delivered_draft_deletes_the_audio_too(live, store):
+    """Every involuntary end drops the tree as well — expiry included."""
+    review = await _open_meeting(live, store)
+    later = store.pending().created_at + timedelta(hours=25)
+
+    await expire_stale(live, store=store, now=later)
+
+    assert not review.review_dir.exists()
+
+
+async def test_a_failed_glossary_turn_never_costs_the_owner_their_note(live, store):
+    """They said 확인. The note is the deliverable; the glossary is a footnote.
+
+    A usage limit, a lost session, a timeout — every reason to be here is survivable, and none of
+    them is a reason to withhold the note the owner just approved.
+    """
+    await _open_meeting(live, store)
+    engine = FakeEngine(ClaudeUsageLimit("5-hour limit reached"))
+
+    reply = await handle_reply("확인", live, store=store, engine=engine)
+
+    assert "저장됨" in reply
+    assert "용어집은 갱신하지 못했습니다" in reply
+    assert len(notes(live)) == 1
+    assert note_data(live)[0]["reviewed"] is True
+    assert store.has_pending() is False
+
+
+async def test_a_lost_session_at_accept_still_writes_the_note(live, store):
+    await _open_meeting(live, store)
+    engine = FakeEngine(ClaudeSessionLost("No conversation found with session ID: sess-m"))
+
+    reply = await handle_reply("확인", live, store=store, engine=engine)
+
+    assert "저장됨" in reply
+    assert note_data(live)[0]["reviewed"] is True
+
+
+async def test_the_glossary_is_only_appended_after_the_note_is_written(live, store):
+    """Every side effect after the last LLM call — the rule's last application, at the end of a
+    review rather than the start of a job."""
+    await _open_meeting(live, store)
+    engine = FakeEngine(ClaudeResult(text=GLOSSARY_REPLY))
+
+    await handle_reply("확인", live, store=store, engine=engine)
+
+    assert len(notes(live)) == 1
+    assert live.glossary_path.is_file()
+
+
+async def test_an_empty_glossary_answer_adds_nothing(live, store):
+    """A clean transcript teaches nothing, and that is a normal outcome."""
+    await _open_meeting(live, store)
+
+    reply = await handle_reply("확인", live, store=store, engine=FakeEngine(ClaudeResult(text="NONE")))
+
+    assert "용어집" not in reply
+    assert not live.glossary_path.exists()
+
+
+async def test_a_memo_review_makes_no_glossary_call(live, store):
+    """Only a transcript can teach the recogniser anything — a memo has nothing behind it."""
+    await _open_review(live, store)
+    engine = FakeEngine()
+
+    await handle_reply("확인", live, store=store, engine=engine)
+
+    assert engine.calls == []
+    assert note_data(live)[0]["type"] == "note"
+
+
+async def test_a_duplicate_term_is_not_appended_twice(live, store):
+    live.glossary_path.write_text(
+        "## 용어 목록\n\n| 전사 표현 | 정확한 표현 | 유형 | 설명 |\n|---|---|---|---|\n"
+        "| 팀웹 | T-map | 제품명 | 기존 |\n",
+        encoding="utf-8",
+    )
+    await _open_meeting(live, store)
+
+    reply = await handle_reply(
+        "확인", live, store=store, engine=FakeEngine(ClaudeResult(text=GLOSSARY_REPLY))
+    )
+
+    assert "용어집에 추가" not in reply
+    assert live.glossary_path.read_text(encoding="utf-8").count("팀웹") == 1

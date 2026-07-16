@@ -124,6 +124,41 @@ def claude_prints(payload: dict) -> str:
     return f"print(json.dumps({payload!r}))"
 
 
+# ------------------------------------------------------------------- STT fakes
+TRANSCRIPT_TEXT = "안녕하세요. 오늘 회의를 시작하겠습니다. 김철수 책임이 팀웹 안건을 맡습니다."
+
+
+@pytest.fixture
+def fake_stt(monkeypatch):
+    """Replace Whisper with a canned transcript. **Required by any test that routes audio.**
+
+    Without it, `handle_audio` calls the real `whisper.transcribe`, which loads 1.5GB of weights
+    into memory before it even looks at the audio — so a test that merely proves *dispatch* would
+    pull in the model. The suite runs no models, and this is what keeps that true once audio stops
+    being a stub.
+
+    Returns the recorded calls, so a test can assert Whisper ran once — or not at all, which is the
+    claim the transcript cache makes.
+    """
+    from contextbot.stt import whisper
+
+    calls: list[dict] = []
+
+    def _transcribe(audio, *, model=whisper.DEFAULT_MODEL, language=whisper.DEFAULT_LANGUAGE, **kw):
+        calls.append({"audio": Path(audio), "model": model, "language": language})
+        return whisper.Transcript(
+            text=TRANSCRIPT_TEXT,
+            segments=[
+                whisper.Segment(0.0, 4.0, "안녕하세요. 오늘 회의를 시작하겠습니다."),
+                whisper.Segment(4.0, 9.0, "김철수 책임이 팀웹 안건을 맡습니다."),
+            ],
+            language="ko",
+        )
+
+    monkeypatch.setattr(whisper, "transcribe", _transcribe)
+    return calls
+
+
 # ------------------------------------------------------------- Telethon fakes
 @dataclass
 class FakeFile:

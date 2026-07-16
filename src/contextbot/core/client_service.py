@@ -19,7 +19,7 @@ from telethon import TelegramClient, events
 
 from ..config import Settings
 from ..handlers.base import DeferMessage
-from ..handlers.conversation import discard_incomplete, expire_stale, handle_reply
+from ..handlers.conversation import discard_incomplete, expire_stale, handle_reply, promote_next
 from .health import HealthChecker, HealthReport
 from .hwm import HighWaterMark
 from .notifier import Notifier
@@ -103,6 +103,11 @@ class ClientService:
                 logger.info("First run: baselined HWM to %s (existing history skipped)", latest)
 
             await self.catch_up()
+            # A queued review can outlive the app too, and if the one ahead of it ended just before
+            # the close, nothing else will ever ask about it: promotion only runs when a review
+            # ends, and that already happened. Ask now, or it waits for the expiry it can never
+            # reach — nothing polls for a review nobody has been asked about.
+            await self._promote()
             # A review survives a restart — the transcript is on disk and keyed by a directory we
             # kept (the measured resume contract). So if one was open when the app closed, pick it
             # back up rather than stranding the owner's draft.
@@ -178,6 +183,21 @@ class ClientService:
         review = self._store.pending()
         return review.created_at if review is not None else None
 
+    async def _promote(self) -> None:
+        """Ask about the next queued review, if the one ahead of it just finished.
+
+        Called wherever a review can end — a reply, the expiry tick, and startup. Promotion makes no
+        engine call, so it cannot fail and needs no unwind; the only way to get this wrong is to
+        forget to call it, which leaves a finished draft nobody is ever asked about.
+        """
+        try:
+            reply = promote_next(self._store)
+        except Exception:  # noqa: BLE001 - a bad promotion must not kill the poll loop
+            logger.exception("Promoting the next queued review failed")
+            return
+        if reply and self._notifier is not None:
+            await self._notifier.send(reply)
+
     async def _on_review_reply(self, text: str) -> None:
         """Feed one bot-DM reply into the open review and relay the outcome.
 
@@ -198,6 +218,10 @@ class ClientService:
                 self._status.set(BotStatus.RUNNING, "실행 중")
         if reply and self._notifier is not None:
             await self._notifier.send(reply)
+        # That reply may have ended the review (확인 / 취소 / a delivered draft). Ask about the next
+        # one **before** returning: the poll loop re-checks `is_active` the moment we do, and would
+        # otherwise stop with a drafted meeting note still waiting in the queue.
+        await self._promote()
 
     async def _on_review_tick(self) -> None:
         """Runs once per poll interval: retire a review the owner never answered."""
@@ -208,6 +232,9 @@ class ClientService:
             return
         if reply and self._notifier is not None:
             await self._notifier.send(reply)
+        if reply:
+            # An expiry ends a review from a background task, so the queue moves up here too.
+            await self._promote()
 
     def is_connected(self) -> bool:
         try:

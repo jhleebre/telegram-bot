@@ -64,13 +64,15 @@ async def test_only_messages_after_hwm_processed(settings, tmp_path):
     assert hwm.value == 6
 
 
-async def test_audio_is_stub_no_file(settings, tmp_path):
+async def test_audio_is_transcribed_and_advances(settings, tmp_path, fake_stt):
+    """Audio flows through the real pipeline now. The engine is off in the fixture, so this lands
+    on the transcript note — but the HWM still advances, because the message *was* ingested."""
     svc, client, bot, hwm = _make(settings, [voice_message(7)], tmp_path, hwm_start=0)
 
     await svc.start()
 
-    assert not list(settings.inbox_dir.iterdir())
-    assert bot.sent and "Phase 2" in bot.sent[0][1]
+    assert len(list(settings.inbox_dir.iterdir())) == 1
+    assert bot.sent and "저장됨" in bot.sent[0][1]
     assert hwm.value == 7
 
 
@@ -220,6 +222,7 @@ import asyncio
 from datetime import datetime, timezone
 
 from contextbot.core.session_store import SessionStore
+from contextbot.handlers.conversation import activate
 
 
 class PollableBot(FakeBot):
@@ -246,12 +249,15 @@ def _with_store(settings, messages, tmp_path, *, hwm_start=0):
     return svc, store
 
 
-def _open_a_review(store, *, message_id=1):
+def _open_a_review(store, *, message_id=1, asked: bool = True):
+    """A review with a draft. ``asked=False`` leaves it queued — drafted, but not yet asked about."""
     review = store.create(
         message_id=message_id, session_id="s",
         title="검토 중", source_date=datetime.now(timezone.utc),
     )
     review.write_draft("초안 본문")
+    if asked:
+        activate(review, store)
     return review
 
 
@@ -349,4 +355,64 @@ async def test_a_review_whose_first_turn_died_with_the_app_is_discarded_at_start
 
     assert store.has_pending() is False
     assert svc._poller is None  # …and nothing is polling for it
+    await svc.stop()
+
+
+# ------------------------------------------------- increment 5: the review queue
+async def test_finishing_a_review_asks_about_the_next_one(settings, tmp_path):
+    """The queue only works if something moves it along, and a review ends in a background task.
+
+    Forgetting this call is the failure the whole design is exposed to: nothing raises, the suite
+    stays green, and a finished meeting-note draft sits in the store that the owner is never asked
+    about — and never can be, because nothing polls for a review nobody has been asked about.
+    """
+    svc, store = _with_store(settings, [], tmp_path)
+    _open_a_review(store, message_id=1)
+    _open_a_review(store, message_id=2, asked=False)
+    await svc.start()
+
+    await svc._on_review_reply("취소")
+
+    assert store.pending().message_id == 2
+    assert any("다음 회의록 차례" in text for _, text in svc._bot.sent)
+    await svc.stop()
+
+
+async def test_polling_survives_the_handover_to_the_next_review(settings, tmp_path):
+    """The poll loop re-checks `is_active` the moment `_on_review_reply` returns, so promotion has
+    to happen *before* it does — otherwise the loop stops with a review still queued."""
+    svc, store = _with_store(settings, [], tmp_path)
+    _open_a_review(store, message_id=1)
+    _open_a_review(store, message_id=2, asked=False)
+    await svc.start()
+
+    await svc._on_review_reply("취소")
+
+    assert svc._poller.is_running
+    assert store.has_pending()
+    await svc.stop()
+
+
+async def test_a_queued_review_left_by_a_restart_is_asked_about_at_startup(settings, tmp_path):
+    """If the review ahead of it ended just before the app closed, nothing else will ever ask:
+    promotion runs when a review ends, and that already happened."""
+    svc, store = _with_store(settings, [], tmp_path)
+    _open_a_review(store, message_id=2, asked=False)
+
+    await svc.start()
+
+    assert store.pending().message_id == 2
+    assert svc._poller is not None and svc._poller.is_running
+    await svc.stop()
+
+
+async def test_nothing_is_promoted_while_a_review_is_still_open(settings, tmp_path):
+    svc, store = _with_store(settings, [], tmp_path)
+    _open_a_review(store, message_id=1)
+    _open_a_review(store, message_id=2, asked=False)
+
+    await svc.start()
+
+    assert store.pending().message_id == 1
+    assert [r.message_id for r in store.queued()] == [2]
     await svc.stop()
