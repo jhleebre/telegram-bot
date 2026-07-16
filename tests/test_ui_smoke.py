@@ -139,6 +139,7 @@ def test_clicking_start_does_not_ask_for_health_yet(qtbot):
 
     assert worker.health_requests == 0
     assert HEALTH_UNKNOWN_COLOR in window._health_light.styleSheet()
+    assert "확인 중" in window._health_light.toolTip()
 
 
 def test_error_signal_resets_button(qtbot):
@@ -160,6 +161,7 @@ def test_the_health_light_is_colour_only_with_no_caption(qtbot):
     worker = StubWorker()
     window = MainWindow(worker)
     qtbot.addWidget(window)
+    window._on_toggle()   # health only ever arrives while it is running
     report = _report(degraded=True)
 
     worker.health_ready.emit(report.overall.value, report.summary(), report.as_html())
@@ -190,8 +192,10 @@ def test_the_health_panel_shows_every_probe_it_is_given(qtbot):
     window = MainWindow(worker)
     qtbot.addWidget(window)
     window.show()
+    window._on_toggle()   # health only ever arrives while it is running
     report = _report(degraded=True)
     worker.health_ready.emit(report.overall.value, report.summary(), report.as_html())
+    assert "whisper-stt" in window._health_label.text(), "the panel must have the report at all"
     window._on_expand()
     window.resize(window.minimumSizeHint().width(), 300)
     qtbot.wait(50)
@@ -455,3 +459,69 @@ def test_the_play_button_is_not_the_loudest_thing_in_the_room(qtbot):
 
     assert play.width() <= 30
     assert play.width() == play.height(), "round means round"
+
+
+# --------------------------------------------------- the light tells the truth
+def test_restarting_does_not_keep_saying_stopped(qtbot):
+    """Grey again, but for a new reason. The previous run's answer describes a bot that no longer
+    exists, and the tooltip has to move with the light or it goes on saying "중지됨" at something
+    that is starting."""
+    worker = StubWorker()
+    window = MainWindow(worker)
+    qtbot.addWidget(window)
+    window._on_toggle()
+    window._on_toggle()   # stopped
+    assert "중지됨" in window._health_light.toolTip()
+
+    window._on_toggle()   # started again
+
+    assert HEALTH_UNKNOWN_COLOR in window._health_light.styleSheet()
+    assert "중지됨" not in window._health_light.toolTip()
+
+
+def test_stopping_puts_the_light_back_to_grey(qtbot):
+    """A green light on a stopped bot is a stale assertion: nothing is being checked, so "정상" is a
+    claim nobody is standing behind — and it would go on making it all night while the CLI's login
+    quietly expired. The probes describe a *running* system; stopped, there is no answer to give."""
+    worker = StubWorker()
+    window = MainWindow(worker)
+    qtbot.addWidget(window)
+    window._on_toggle()
+    report = _report()
+    worker.health_ready.emit(report.overall.value, report.summary(), report.as_html())
+    assert HEALTH_COLORS[HealthStatus.HEALTHY] in window._health_light.styleSheet()
+
+    window._on_toggle()   # stop
+
+    assert HEALTH_UNKNOWN_COLOR in window._health_light.styleSheet()
+    assert "중지됨" in window._health_light.toolTip()
+
+
+def test_a_late_health_report_does_not_light_up_a_stopped_bot(qtbot):
+    """The timer is stopped by then, but a check already in flight still resolves — and would light
+    the bot back up green a moment after it was told to stop."""
+    worker = StubWorker()
+    window = MainWindow(worker)
+    qtbot.addWidget(window)
+    window._on_toggle()
+    window._on_toggle()   # stopped again before the check comes back
+    report = _report()
+
+    worker.health_ready.emit(report.overall.value, report.summary(), report.as_html())
+
+    assert HEALTH_UNKNOWN_COLOR in window._health_light.styleSheet()
+
+
+def test_halting_itself_also_greys_the_light(qtbot):
+    """The bot stops itself on a usage limit, and that path never touches the button."""
+    worker = StubWorker()
+    window = MainWindow(worker)
+    qtbot.addWidget(window)
+    window._on_toggle()
+    report = _report()
+    worker.health_ready.emit(report.overall.value, report.summary(), report.as_html())
+
+    worker.status_changed.emit(BotStatus.STOPPED.value, "⏸ 사용량 한도 — 리셋 후 Start를 눌러주세요")
+
+    assert HEALTH_UNKNOWN_COLOR in window._health_light.styleSheet()
+    assert window._play_btn.is_running is False

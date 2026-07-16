@@ -250,8 +250,19 @@ class MainWindow(QWidget):
         self._play_btn.set_running(running)
         if running:
             self._health_timer.start()
+            # Grey again, but for a new reason: the last run's answer describes a bot that no longer
+            # exists, and the check that will replace it has not run yet. The tooltip has to move
+            # with the light or it goes on saying "중지됨" at something that is starting.
+            self._set_light(HEALTH_UNKNOWN_COLOR, "확인 중…")
         else:
             self._health_timer.stop()
+            # Stopping puts the light back to grey. A green light on a stopped bot is a **stale
+            # assertion**: nothing is being checked, so "정상" is a claim nobody is standing behind
+            # — and it would keep making it all night while the CLI's login quietly expired. The
+            # probes are about a *running* system anyway (a connection, an authorised session), so
+            # once it stops there is no answer to give, only a last one to remember. That is what
+            # the panel behind `⌄` is for.
+            self._set_light(HEALTH_UNKNOWN_COLOR, "중지됨 — 확인하지 않는 중")
 
     def _show_health(self, overall: str, summary: str, detail: str) -> None:
         """Show the health report: a light always, the probes when expanded.
@@ -261,7 +272,15 @@ class MainWindow(QWidget):
         bottom, invisible: a word-wrapped QLabel does not tell a layout how tall it needs to be, so
         a long path silently ate the lines below it. The probe whose whole job is to be read before
         you send a recording was the first to vanish.
+
+        **A report that lands after the bot stopped is dropped**, not shown. The timer is stopped by
+        then, but a check already in flight still resolves — and it would light the bot back up
+        green a moment after it was told to stop. It also covers the sharper case: Start, then Stop
+        before the starting sequence finishes, whose health check arrives to describe a bot that is
+        on its way down.
         """
+        if not self._running:
+            return
         self._set_light(HEALTH_COLORS[HealthStatus(overall)], summary)
         label = self._health_label
         label.setText(detail)
