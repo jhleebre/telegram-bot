@@ -1002,6 +1002,64 @@ Scope: `handlers/audio_handler.py`, `mlx-whisper` STT, the shared glossary, and 
 see *A. Audio → meeting note* above for the pipeline, and *Increment 4 (as built)* for the state
 machine it plugs into.
 
+#### First: delete the `#검토` scaffolding — **as increment 5's last step, not its first**
+
+**`#검토` is scaffolding, and increment 5 is where it dies.** It exists only because the state
+machine had to be built and verified before audio existed (the delivery approach's advice). It is
+now **owner-verified and has no remaining purpose**: the moment audio is the producer, a magic
+prefix in the *capture* channel is a wart. Saved Messages means "throw it in, it becomes a note" —
+`#검토` makes that semantics conditional, which is exactly the design that produced the
+`#검토된 사항` mangling bug above. **Owner's call, recorded here so it cannot ossify into a feature
+by accident.**
+
+**Delete it last, not first**, for two reasons — the second decides it:
+
+1. It is the **control group** while you build. `#검토` exercises the whole review loop in the real
+   app in seconds with **no Whisper in the path**, so "is it my new code or the existing plumbing?"
+   has a cheap answer. Increment 5 *does* touch the shared path (glossary side effects at accept
+   time; possibly `handle_reply` for the queue), so that question will come up.
+2. Deleting it first leaves **increment 4 unreachable from the app**. `#검토` is currently the only
+   producer of a review, so removing it before audio is wired makes the store, the poller, and the
+   conversation module ~700 lines that nothing in the running app can open. The suite stays green
+   (its tests call `handle_reply` directly), which is precisely what makes that state dangerous.
+
+**The removal boundary** — recorded now, while the increment-4 context is fresh, so this is a
+mechanical delete rather than an archaeology exercise:
+
+| Delete (scaffolding) | Keep (shared plumbing) |
+|----------------------|------------------------|
+| `REVIEW_PREFIX`, `is_review_request`, `strip_prefix` | `SessionStore` / `PendingReview` / `ReviewState`, whole |
+| `handle_review_request` — replaced by the audio producer | `handle_reply`, `_revise`, `_stay`, `deliver_draft`, `expire_stale`, `discard_incomplete` |
+| `_plain_note` (memo-specific fallback) | `review_block`, `parse_draft`, `_has_questions`, `_elide`; **`_write` — but see below, it is not media-neutral yet** |
+| the `is_review_request` branch in `core/router.py:route` | `core/review_poller.py`, whole; the `ClientService` wiring |
+| `engine/prompts/review_draft.md` | `engine/prompts/review_revise.md` — **turn 2+ is media-agnostic** |
+| in `test_conversation.py`: `test_is_review_request`, the trigger/prefix cases, `test_a_plain_memo_never_enters_the_review_loop`, `test_engine_off_saves_a_plain_note…`, `test_a_failed_first_draft_still_saves_the_memo`, `test_a_memo_starting_with_a_similar_word_is_not_mangled` | every test from `_open_review` onward — rebuild the fixture on the audio producer and they all still apply |
+| in `test_router.py`: the two `#검토` dispatch cases | — |
+
+**The contract the audio producer must honour** (it is what the kept code above assumes):
+
+- Turn 1's output parses through `parse_draft`: a `제목:` first line, the body, then the questions
+  under the `QUESTIONS_HEADING` (`## 확인 요청`). **So the meeting-note prompt must carry
+  `questions_heading` and the `제목:` line**, the same way `review_draft.md` does — copy that
+  structure, not its wording. `review_revise.md` then works unchanged, because a revision turn does
+  not care whether the draft came from a memo or a recording.
+- `- (없음)` under the heading means "nothing to ask" — for audio that is the flagged-glossary-terms
+  list being empty.
+- **`_write` hardcodes `note_type="note"` and `tags=[]`**, which is the memo's answer smuggled into
+  shared code. A meeting note wants `type: meeting`, so the producer has to own this: add
+  `note_type` (and tags, if the meeting prompt supplies them) to `PendingReview` and pass it
+  through. `from_json` already defaults every optional field, so widening the persisted schema
+  costs nothing. **This is a quiet trap** — nothing fails, the note just lands with the wrong
+  `type:` in its frontmatter, and only a reader who looks will notice.
+- **Accepting must grow a side-effect hook, and it is not a small point.** `_write` is the *whole*
+  of what accepting does today. Increment 5 needs two more things at that moment — **append the
+  confirmed terms to the glossary** and **delete the audio original** — and both are the answer to
+  "what does *success* mean". Note where that leaves you: acceptance happens in a **poller
+  background task**, turns after the handler that downloaded the file, so whatever holds the audio
+  has to be reachable from there (`review.work_dir` is the obvious home — it lives exactly as long
+  as the review) or the deletion must be given up on deliberately. The glossary append is a side
+  effect **after the last LLM call** of the last turn, which is the one place the rule still holds.
+
 **What increment 4 leaves you (do not re-invent):**
 
 - **`conversation.start`-shaped work is already done.** `handle_review_request` is the *producer*
