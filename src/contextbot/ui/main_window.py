@@ -288,7 +288,10 @@ class MainWindow(QWidget):
         else:
             self._worker.start_bot()
             self._set_running_style(True)
-            self._worker.request_health()
+            # No health check here. `start_bot` only queues the work, so asking now asks a client
+            # that has not connected — which answers "not logged in", in red, on a machine that is
+            # logged in fine. The worker asks the moment the starting sequence actually finishes;
+            # until then the light stays grey, which is the honest answer to "how is it?".
 
     def _on_status_changed(self, status_value: str, message: str) -> None:
         self._show_status(BotStatus(status_value), message)

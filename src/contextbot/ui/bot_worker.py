@@ -51,7 +51,7 @@ class BotWorker(QThread):
     # ---------------------------------------------- control (main thread → loop)
     def start_bot(self) -> None:
         fut = asyncio.run_coroutine_threadsafe(self._service.start(), self._loop)
-        fut.add_done_callback(self._report_exception)
+        fut.add_done_callback(self._after_start)
 
     def stop_bot(self) -> None:
         asyncio.run_coroutine_threadsafe(self._service.stop(), self._loop)
@@ -71,10 +71,22 @@ class BotWorker(QThread):
 
         fut.add_done_callback(_done)
 
-    def _report_exception(self, fut) -> None:
+    def _after_start(self, fut) -> None:
+        """Report a failed start, or check health now that the client is actually up.
+
+        **`start_bot` returns immediately** — it only queues `start()` on the loop — so a health
+        check fired from the click ran against a client that had not connected yet. It did not
+        report "unknown", it reported *`telethon-auth: not logged in (run login.py)`*: red, alarming,
+        and false, on a machine that is perfectly logged in. It then stayed that way until the 15s
+        timer happened to re-check.
+
+        This is the first moment a check can tell the truth, so it is the moment to ask.
+        """
         exc = fut.exception()
         if exc is not None:
             self.error.emit(str(exc))
+            return
+        self.request_health()
 
     # ------------------------------------------------------------- shutdown
     def shutdown(self, timeout: float = 10.0) -> None:

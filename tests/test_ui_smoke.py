@@ -113,7 +113,6 @@ def test_main_window_toggle_and_signals(qtbot):
     window._on_toggle()
     assert worker.started is True
     assert window._play_btn.is_running is True
-    assert worker.health_requests >= 1
 
     worker.status_changed.emit(BotStatus.RUNNING.value, "실행 중")
     assert window._message.full_text() == "실행 중"
@@ -124,6 +123,22 @@ def test_main_window_toggle_and_signals(qtbot):
 
     worker.log_line.emit("hello log")
     assert "hello log" in window._log_view.toPlainText()
+
+
+def test_clicking_start_does_not_ask_for_health_yet(qtbot):
+    """`start_bot` only queues the work, so asking now asks a client that has not connected — and
+    it does not answer "unknown", it answers `telethon-auth: not logged in (run login.py)`: red,
+    alarming, and false on a machine that is logged in fine. The worker asks once the starting
+    sequence really finishes; until then the light stays grey, which is the honest answer.
+    """
+    worker = StubWorker()
+    window = MainWindow(worker)
+    qtbot.addWidget(window)
+
+    window._on_toggle()
+
+    assert worker.health_requests == 0
+    assert HEALTH_UNKNOWN_COLOR in window._health_light.styleSheet()
 
 
 def test_error_signal_resets_button(qtbot):
