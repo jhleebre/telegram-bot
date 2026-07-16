@@ -238,3 +238,29 @@ def test_invalid_review_expiry(tmp_path, raw):
     env["REVIEW_EXPIRY_HOURS"] = raw
     with pytest.raises(ConfigError, match="REVIEW_EXPIRY_HOURS"):
         Settings.load(env, use_dotenv=False)
+
+
+def test_the_meeting_timeout_is_a_hang_detector_not_a_budget(tmp_path):
+    """Measured: a real ~hour-long meeting's draft turn took 423s. The owner's meetings run past an
+    hour, and being too short does not delay — it *loses the note* (ClaudeTimeout degrades to a
+    transcript-only note, throwing away the Whisper run and the drafting pass)."""
+    settings = Settings.load(_base_env(tmp_path), use_dotenv=False)
+    assert settings.claude_meeting_timeout_sec == 3600.0
+
+
+def test_the_meeting_timeout_is_independent_of_the_shared_default(tmp_path):
+    """A meeting's length has nothing to do with how long a text memo may take, so it is its own
+    dial rather than a floor over CLAUDE_TIMEOUT_SEC."""
+    env = _base_env(tmp_path)
+    env.update(CLAUDE_TIMEOUT_SEC="120", CLAUDE_MEETING_TIMEOUT_SEC="7200")
+    settings = Settings.load(env, use_dotenv=False)
+    assert settings.claude_timeout_sec == 120.0
+    assert settings.claude_meeting_timeout_sec == 7200.0
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "abc"])
+def test_a_bad_meeting_timeout_is_a_config_error(tmp_path, bad):
+    env = _base_env(tmp_path)
+    env["CLAUDE_MEETING_TIMEOUT_SEC"] = bad
+    with pytest.raises(ConfigError, match="CLAUDE_MEETING_TIMEOUT_SEC"):
+        Settings.load(env, use_dotenv=False)

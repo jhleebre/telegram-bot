@@ -1419,12 +1419,19 @@ The owner ran a **real ~40-minute meeting** through it (`을지로2가.m4a`, 26M
 
 **Two problems fell out, and neither was findable without a real recording of a real length.**
 
-1. **The 600s timeout was a guess, and it was wrong.** The draft turn ate **70% of it** on an
-   ordinary meeting; a meeting twice as long would have blown it — and blowing it does not just
-   delay, it **loses the note**: `ClaudeTimeout` degrades to a transcript-only note, so the whole
-   expensive pipeline is spent and thrown away at the last step. The asymmetry is total (too long
-   costs patience the owner is not spending anyway, since the job is async and they are not
-   watching), so it is now **1800s** — ~4x measured.
+1. **The 600s timeout was a guess, and it was wrong.** The draft turn ate **70% of it** — and the
+   owner's follow-up is what sized the fix: *"1시간이 넘는 회의도 종종 있다"*. That reframes the
+   measurement, because 24,215 characters of Korean speech is already ~an hour, so **423s was the
+   ordinary case, not the bad one**. A two-hour meeting would blow 600s, and blowing it does not
+   delay — it **destroys the note**: `ClaudeTimeout` degrades to a transcript-only note, so minutes
+   of Whisper and a full drafting pass are spent and thrown away at the last step. The asymmetry is
+   total (too long costs patience nobody is spending — the job is async and unwatched), so it is now
+   **`CLAUDE_MEETING_TIMEOUT_SEC`, default 3600s**: a **hang detector, not a budget**. An hour means
+   *this is stuck*, not *this is a long meeting*. Whisper is not timed at all, for the same reason.
+
+   It gets **its own dial rather than a floor over `CLAUDE_TIMEOUT_SEC`**, because how long a
+   meeting takes to write up has nothing to do with how long a text memo may take — and because the
+   owner says the variance is real, which is exactly what a setting is for.
 2. **13 minutes of total silence**, from sending the recording to the review block. Every other
    pipeline replies in seconds, so this is audio's alone — and the owner, on a phone with no view of
    the app's PROCESSING status, reasonably concluded the bot was broken and said so. The client now
@@ -1440,10 +1447,13 @@ turn re-reads the whole transcript. That is 10-30x a text memo, and the *Cost no
 shared with the owner's own Claude Code sessions, a few meetings is a real fraction of the
 allowance.
 
-*(A note on the transcript: two of the 878 segments were Whisper repetition loops —
-`우리 우리 우리…` ×70 over silence. 0.2% of the transcript, and the model drafted through them
-without trouble, so it is recorded here rather than fixed. If it ever gets worse, the lever is
-`condition_on_previous_text=False`, which is what feeds those loops.)*
+*(Two notes on that run. **The transcript**: two of the 878 segments were Whisper repetition loops
+— `우리 우리 우리…` ×70 over silence. 0.2%, and the model drafted through them without trouble, so it
+is recorded rather than fixed; if it worsens, the lever is `condition_on_previous_text=False`, which
+is what feeds those loops. **The glossary added nothing**, which looked like a miss and was not —
+the owner had told the model during the review not to update it, and it obeyed. Worth knowing that
+the failure mode of this feature is silent in both directions: a glossary that does not grow may be
+correct, and only the owner knows which.)*
 
 **Verification status.** Also driven for real, end-to-end through `handle_audio` and `handle_reply`
 against the real `claude` binary and real `mlx-whisper`, on a synthesized Korean recording:

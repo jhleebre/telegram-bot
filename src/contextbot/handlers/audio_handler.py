@@ -64,18 +64,6 @@ _SENTINEL = "DRAFT_FAILED"
 _MIN_OUTPUT_CHARS = 20
 _TRANSCRIPT_NAME = "transcript.txt"
 
-# Drafting a whole meeting note from a long transcript is the heaviest job in the project, and this
-# number is **measured, not guessed**. The first real meeting — a 38KB transcript, 878 segments —
-# took the model **423s over 3 turns** (it reads the transcript, then the 20KB glossary, then
-# writes). The first draft of this constant was 600s, which that run ate 70% of; a meeting twice as
-# long would have blown it.
-#
-# The asymmetry decides the value. Too long costs nothing but patience — the job is async, the UI
-# and Telethon keep running, and the owner is not watching. Too short **loses the meeting note**:
-# the timeout raises ClaudeTimeout, which degrades to a transcript-only note, so the expensive work
-# is spent and thrown away at the last step. So: ~4x the measured case.
-_MEETING_TIMEOUT_SEC = 1800.0
-
 # The vault's own convention, read off the vault rather than chosen: 35 notes carry
 # `type: meeting-note`, none carry `type: meeting`.
 NOTE_TYPE = "meeting-note"
@@ -265,7 +253,9 @@ async def _draft(
             add_dirs=add_dirs,
             cwd=review.work_dir,
             model=settings.claude_meeting_model,
-            timeout_sec=max(settings.claude_timeout_sec, _MEETING_TIMEOUT_SEC),
+            # Its own dial, not a floor over the shared default: a meeting's length has nothing to do
+            # with how long a text memo may take. See config.DEFAULT_CLAUDE_MEETING_TIMEOUT_SEC.
+            timeout_sec=settings.claude_meeting_timeout_sec,
         )
         if _draft_failed(result.text):
             raise ClaudeError("회의록 초안을 만들지 못했습니다")

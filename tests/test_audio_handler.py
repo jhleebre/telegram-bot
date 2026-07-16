@@ -553,3 +553,14 @@ async def test_a_transcript_only_note_is_still_a_meeting(live, store, fake_stt):
     await handle_audio(audio_message(), live, engine=FakeEngine(ClaudeError("boom")), store=store)
 
     assert notes(live)[0].name.startswith("260715-회의-")
+
+
+async def test_the_drafting_turn_gets_the_meeting_timeout_not_the_default(live, store, fake_stt):
+    """A ~hour-long meeting's draft turn measured 423s. The shared 120s default would kill every
+    real meeting, and killing it does not delay the note — it destroys it."""
+    tuned = replace(live, claude_timeout_sec=120.0, claude_meeting_timeout_sec=7200.0)
+    engine = FakeEngine()
+
+    await handle_audio(audio_message(), tuned, engine=engine, store=store)
+
+    assert engine.calls[0]["timeout_sec"] == 7200.0

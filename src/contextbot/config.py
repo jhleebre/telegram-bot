@@ -39,11 +39,24 @@ DEFAULT_CLAUDE_PDF_MODEL = "opus"
 # defaulting to opus. CLAUDE_IMAGE_MODEL is the dial if a real photo ever proves harder.
 DEFAULT_CLAUDE_IMAGE_MODEL = "sonnet"
 DEFAULT_CLAUDE_TIMEOUT_SEC = 120.0
-# Drafting a meeting note is the heaviest text job in the project: a long transcript in, a whole
-# structured note out, plus the glossary to apply and terms to flag. It gets a floor well above the
-# default budget rather than a model bump — the PDF route's flakiness was about *reading* a
-# document, and there is nothing to read here but text.
+# Drafting a meeting note is the heaviest job in the project, but it stays on the cheap default: it
+# is a long *text* job, and the PDF route's flakiness (which is what CLAUDE_PDF_MODEL exists for)
+# was about *reading* a rendered document. There is nothing to read here but text. What this route
+# needed was time, not a bigger model — see DEFAULT_CLAUDE_MEETING_TIMEOUT_SEC.
 DEFAULT_CLAUDE_MEETING_MODEL = "sonnet"
+# How long the meeting-note drafting turn may run. **Measured, and it gets its own dial because the
+# variance is real**: the owner's meetings run past an hour, and a first real one (a 38KB transcript
+# from ~an hour of speech) took the model **423s over 3 turns** — it reads the transcript, then the
+# 20KB glossary, then writes. A 600s guess would have covered that with 30% to spare and lost a
+# two-hour meeting.
+#
+# The asymmetry is what sets it this high. Too long costs only patience nobody is spending — the job
+# is async, the UI and Telethon keep running, and the owner is not watching a progress bar. Too
+# short **destroys the work**: the timeout raises ClaudeTimeout, which degrades to a transcript-only
+# note, so minutes of Whisper and a full drafting pass are spent and then thrown away at the last
+# step. So this is a **hang detector, not a budget** — an hour means "this is stuck", not "this is a
+# long meeting". Whisper itself is not timed at all, for the same reason.
+DEFAULT_CLAUDE_MEETING_TIMEOUT_SEC = 3600.0
 # Whisper. The model is an HF repo id, not a file — see stt/whisper.py, which refuses to download it
 # mid-job. `ko` because the meetings are Korean; Whisper does detect language, but telling it beats
 # letting it guess on the first few seconds of small talk.
@@ -98,6 +111,7 @@ class Settings:
     claude_image_model: str = DEFAULT_CLAUDE_IMAGE_MODEL
     claude_meeting_model: str = DEFAULT_CLAUDE_MEETING_MODEL
     claude_timeout_sec: float = DEFAULT_CLAUDE_TIMEOUT_SEC
+    claude_meeting_timeout_sec: float = DEFAULT_CLAUDE_MEETING_TIMEOUT_SEC
     whisper_model: str = DEFAULT_WHISPER_MODEL
     whisper_language: str = DEFAULT_WHISPER_LANGUAGE
     review_expiry_hours: float = DEFAULT_REVIEW_EXPIRY_HOURS
@@ -115,6 +129,7 @@ class Settings:
             f"claude_image_model={self.claude_image_model!r}, "
             f"claude_meeting_model={self.claude_meeting_model!r}, "
             f"claude_timeout_sec={self.claude_timeout_sec}, "
+            f"claude_meeting_timeout_sec={self.claude_meeting_timeout_sec}, "
             f"whisper_model={self.whisper_model!r}, "
             f"whisper_language={self.whisper_language!r}, "
             f"review_expiry_hours={self.review_expiry_hours})"
@@ -222,6 +237,22 @@ class Settings:
                         f"CLAUDE_TIMEOUT_SEC must be positive, got {claude_timeout_sec}"
                     )
 
+        claude_meeting_timeout_sec = DEFAULT_CLAUDE_MEETING_TIMEOUT_SEC
+        raw_meeting_timeout = (env.get("CLAUDE_MEETING_TIMEOUT_SEC") or "").strip()
+        if raw_meeting_timeout:
+            try:
+                claude_meeting_timeout_sec = float(raw_meeting_timeout)
+            except ValueError:
+                errors.append(
+                    f"CLAUDE_MEETING_TIMEOUT_SEC must be a number, got {raw_meeting_timeout!r}"
+                )
+            else:
+                if claude_meeting_timeout_sec <= 0:
+                    errors.append(
+                        "CLAUDE_MEETING_TIMEOUT_SEC must be positive, got "
+                        f"{claude_meeting_timeout_sec}"
+                    )
+
         review_expiry_hours = DEFAULT_REVIEW_EXPIRY_HOURS
         raw_expiry = (env.get("REVIEW_EXPIRY_HOURS") or "").strip()
         if raw_expiry:
@@ -255,6 +286,7 @@ class Settings:
             claude_image_model=claude_image_model,
             claude_meeting_model=claude_meeting_model,
             claude_timeout_sec=claude_timeout_sec,
+            claude_meeting_timeout_sec=claude_meeting_timeout_sec,
             whisper_model=whisper_model,
             whisper_language=whisper_language,
             review_expiry_hours=review_expiry_hours,

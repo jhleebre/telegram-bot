@@ -302,8 +302,12 @@ class ClientService:
         if incoming.kind is not MessageKind.AUDIO or self._notifier is None:
             return
         await self._notifier.send(
+            # No tight estimate, on purpose. A ~1-hour meeting measured 320s of Whisper + 423s of
+            # drafting ≈ 13 minutes, and the owner's meetings run longer — promising "5분" and
+            # taking 25 would recreate the exact "is it broken?" moment this message exists to
+            # prevent.
             "🎙 녹음을 받았습니다 — 전사하고 회의록 초안을 만드는 중입니다.\n"
-            "길이에 따라 5-20분쯤 걸리고, 준비되면 초안을 보내드립니다."
+            "회의 길이에 따라 10분 이상 걸릴 수 있습니다. 다 되면 초안을 보내드릴게요."
         )
 
     async def _process(self, message, *, notify_status: bool) -> None:
