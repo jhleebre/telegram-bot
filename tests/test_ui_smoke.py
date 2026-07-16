@@ -29,7 +29,8 @@ from contextbot.core.health import (  # noqa: E402
 )
 from contextbot.core.status import STATUS_TAGLINES, BotStatus  # noqa: E402
 from contextbot.ui.elided_label import ElidedLabel  # noqa: E402
-from contextbot.ui.main_window import _PLAY_GLYPH, _STOP_GLYPH, MainWindow  # noqa: E402
+from contextbot.ui.icon_buttons import ChevronButton, PlayStopButton  # noqa: E402
+from contextbot.ui.main_window import MainWindow  # noqa: E402
 
 
 class StubWorker(QObject):
@@ -107,13 +108,11 @@ def test_main_window_toggle_and_signals(qtbot):
     window = MainWindow(worker)
     qtbot.addWidget(window)
 
-    assert window._play_btn.text() == _PLAY_GLYPH
-    assert window._play_btn.property("running") is False
+    assert window._play_btn.is_running is False
 
     window._on_toggle()
     assert worker.started is True
-    assert window._play_btn.text() == _STOP_GLYPH
-    assert window._play_btn.property("running") is True
+    assert window._play_btn.is_running is True
     assert worker.health_requests >= 1
 
     worker.status_changed.emit(BotStatus.RUNNING.value, "실행 중")
@@ -121,7 +120,7 @@ def test_main_window_toggle_and_signals(qtbot):
 
     window._on_toggle()
     assert worker.stopped is True
-    assert window._play_btn.text() == _PLAY_GLYPH
+    assert window._play_btn.is_running is False
 
     worker.log_line.emit("hello log")
     assert "hello log" in window._log_view.toPlainText()
@@ -135,7 +134,7 @@ def test_error_signal_resets_button(qtbot):
 
     worker.error.emit("bad token")
 
-    assert window._play_btn.text() == _PLAY_GLYPH
+    assert window._play_btn.is_running is False
     assert "bad token" in window._log_view.toPlainText()
 
 
@@ -384,3 +383,60 @@ def test_the_full_message_survives_elision(qtbot):
     qtbot.wait(20)
 
     assert label.text().endswith("긴 메시지입니다"), "widening must restore the full text"
+
+
+# ------------------------------------------------------ drawn, not typed
+def test_the_chevron_is_one_shape_turned_over(qtbot):
+    """`⌄` and `⌃` are *different characters* (U+2304, U+2303). They look like a pair in a table and
+    are not one in a typeface — different weights, sizes and baselines — so the chevron changed
+    shape and jumped as the panel opened. Painting it and rotating the painter 180° makes up and
+    down the same shape by construction rather than by a font's good intentions.
+
+    Asserted on the pixels, because that is where the bug was: every pixel of the up chevron must be
+    the diagonally opposite pixel of the down one. The tolerance is for antialiasing, which Qt's
+    rasteriser does not promise to make perfectly symmetric — it is not room for a different glyph.
+    """
+    button = ChevronButton()
+    qtbot.addWidget(button)
+    button.show()
+    qtbot.wait(20)
+
+    down = button.grab().toImage()
+    button.set_pointing_up(True)
+    qtbot.wait(20)
+    up = button.grab().toImage()
+
+    assert up != down, "the chevron must actually turn over"
+
+    width, height = down.width(), down.height()
+    worst = 0
+    for y in range(height):
+        for x in range(width):
+            here = down.pixelColor(x, y)
+            opposite = up.pixelColor(width - 1 - x, height - 1 - y)
+            worst = max(
+                worst,
+                abs(here.red() - opposite.red()),
+                abs(here.green() - opposite.green()),
+                abs(here.blue() - opposite.blue()),
+            )
+    assert worst <= 24, f"the two directions are not the same shape (worst channel diff {worst})"
+
+
+def test_the_chevron_and_the_play_button_are_the_same_height(qtbot):
+    """They sit in one row: matching heights are what let the layout centre controls against each
+    other instead of against two fonts' baselines, which is what looked crooked."""
+    qtbot.addWidget(chevron := ChevronButton())
+    qtbot.addWidget(play := PlayStopButton())
+
+    assert chevron.height() == play.height()
+
+
+def test_the_play_button_is_not_the_loudest_thing_in_the_room(qtbot):
+    """It was 36px of saturated fill — the biggest element in a window whose actual news is the line
+    of text beside it. This is a status bar, not a transport control."""
+    play = PlayStopButton()
+    qtbot.addWidget(play)
+
+    assert play.width() <= 30
+    assert play.width() == play.height(), "round means round"

@@ -26,13 +26,15 @@ _ICONS = {
 
 # Colour hint per state, for the UI's indicator light. Here rather than in the UI for the same
 # reason :func:`HealthReport.summary` is: it is a fact about the report, and it stays testable.
+# macOS system colours, not web-palette approximations — this is a Mac app, and a #2ecc71 dot beside
+# a native control reads as a slightly-wrong green.
 HEALTH_COLORS = {
-    HealthStatus.HEALTHY: "#2ecc71",   # green
-    HealthStatus.DEGRADED: "#f5a623",  # amber
-    HealthStatus.ERROR: "#e74c3c",     # red
+    HealthStatus.HEALTHY: "#34C759",   # systemGreen
+    HealthStatus.DEGRADED: "#FF9500",  # systemOrange
+    HealthStatus.ERROR: "#FF3B30",     # systemRed
 }
 # Before the first check has run there is nothing to report — not even "fine".
-HEALTH_UNKNOWN_COLOR = "#c9cee0"
+HEALTH_UNKNOWN_COLOR = "#C9CEDB"
 
 
 @dataclass

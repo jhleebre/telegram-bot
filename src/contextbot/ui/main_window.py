@@ -2,8 +2,8 @@
 
 **Collapsed is the normal state**, and it is one row:
 
-    (▶)  잠자는 중 — Start를 눌러 깨워주세요                        ●  ⌄
-    play  what the bot is doing                              health  expand
+    (▶)  잠자는 중 — Start를 눌러 깨워주세요                       ● ⌄
+    play  what the bot is doing                             health/expand
 
 That is the whole app most of the time, because that is the whole question most of the time ("is it
 on, and is anything wrong?"). The light answers the second half by colour alone; when it is amber or
@@ -19,6 +19,9 @@ Three things it deliberately does not do:
 - **It does not reflow.** Every column but the message is fixed-width, so nothing shifts as the text
   or the health changes underneath it.
 
+Both buttons are **drawn, not typed** (see `icon_buttons`): a font is not a shape library, and the
+chevron in particular was two different characters pretending to be one shape.
+
 Styling is self-contained QSS so the look is consistent regardless of the system theme.
 """
 
@@ -31,7 +34,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
-    QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -41,16 +43,23 @@ from ..core.health import HEALTH_COLORS, HEALTH_UNKNOWN_COLOR, HealthStatus
 from ..core.status import STATUS_TAGLINES, BotStatus
 from .bot_worker import BotWorker
 from .elided_label import ElidedLabel
+from .icon_buttons import ChevronButton, PlayStopButton
 
 _HEALTH_INTERVAL_MS = 15_000
 _MAX_LOG_BLOCKS = 500
 
 # The row's columns. Everything except the message is **fixed**, and that is the point: sized to
 # content, every column moved whenever anything changed underneath it — a status bar that
-# rearranges itself while you read it is worse than one that wastes a few pixels.
-_PLAY_SIZE = 36
-_LIGHT_SIZE = 12
-_EXPAND_WIDTH = 26
+# rearranges itself while you read it is worse than one that wastes a few pixels. The two buttons
+# size themselves (see icon_buttons) and match each other, so the row centres controls against
+# controls rather than against two fonts' baselines.
+_LIGHT_SIZE = 10
+
+# Spacing is grouped, not even. The light and the chevron are one idea — "how is it, and show me" —
+# so they sit closer to each other than to the message. Even spacing would read as three unrelated
+# things in a row, which is what it was.
+_GAP = 12
+_TIGHT_GAP = 4
 
 # The one elastic column, and it is deliberately generous — a short message and a long one should
 # both look like they belong. Measured against the taglines rather than picked: the longest is 188px
@@ -85,23 +94,6 @@ QLabel#health {
     font-size: 12px;
     color: #3a3f57;
 }
-#play {
-    border: none;
-    border-radius: 18px;
-    font-size: 12px;
-    color: #ffffff;
-    background-color: #2ecc71;
-}
-#play:hover { background-color: #29b765; }
-#play[running="true"] { background-color: #e74c3c; }
-#play[running="true"]:hover { background-color: #d1412f; }
-#expand {
-    border: none;
-    background: transparent;
-    color: #9aa0b5;
-    font-size: 14px;
-}
-#expand:hover { color: #3a3f57; }
 QPlainTextEdit#log {
     background-color: #1e2233;
     color: #cdd3ea;
@@ -110,11 +102,6 @@ QPlainTextEdit#log {
     padding: 8px;
 }
 """
-
-# Text-presentation variation selector: without it macOS renders ▶ as the colour emoji ▶️, which is
-# the opposite of a plain glyph on a coloured button.
-_PLAY_GLYPH = "▶︎"
-_STOP_GLYPH = "■︎"
 
 
 def _card(title: str) -> tuple[QFrame, QVBoxLayout]:
@@ -147,12 +134,7 @@ class MainWindow(QWidget):
         # layout already knows both numbers.
 
         # ---- the collapsed row.
-        self._play_btn = QPushButton(_PLAY_GLYPH)
-        self._play_btn.setObjectName("play")
-        self._play_btn.setCursor(Qt.PointingHandCursor)
-        self._play_btn.setProperty("running", False)
-        self._play_btn.setFixedSize(_PLAY_SIZE, _PLAY_SIZE)
-        self._play_btn.setToolTip("시작")
+        self._play_btn = PlayStopButton()
         self._play_btn.clicked.connect(self._on_toggle)
 
         self._message = ElidedLabel()
@@ -169,11 +151,7 @@ class MainWindow(QWidget):
         self._health_light.setFixedSize(_LIGHT_SIZE, _LIGHT_SIZE)
         self._set_light(HEALTH_UNKNOWN_COLOR, "아직 확인 전이에요")
 
-        self._expand_btn = QPushButton("⌄")
-        self._expand_btn.setObjectName("expand")
-        self._expand_btn.setCursor(Qt.PointingHandCursor)
-        self._expand_btn.setToolTip("자세히 보기")
-        self._expand_btn.setFixedWidth(_EXPAND_WIDTH)
+        self._expand_btn = ChevronButton()
         self._expand_btn.clicked.connect(self._on_expand)
 
         self._bar = QFrame()
@@ -181,11 +159,14 @@ class MainWindow(QWidget):
         self._bar.setFrameShape(QFrame.NoFrame)
         self._bar.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         row = QHBoxLayout(self._bar)
-        row.setContentsMargins(_BAR_MARGIN, _BAR_MARGIN, _BAR_MARGIN + 4, _BAR_MARGIN)
-        row.setSpacing(12)
+        row.setContentsMargins(_BAR_MARGIN, _BAR_MARGIN, _BAR_MARGIN, _BAR_MARGIN)
+        row.setSpacing(0)
         row.addWidget(self._play_btn)
+        row.addSpacing(_GAP)
         row.addWidget(self._message, 1)
+        row.addSpacing(_GAP)
         row.addWidget(self._health_light)
+        row.addSpacing(_TIGHT_GAP)
         row.addWidget(self._expand_btn)
 
         # ---- the detail, hidden until asked for.
@@ -261,12 +242,7 @@ class MainWindow(QWidget):
 
     def _set_running_style(self, running: bool) -> None:
         self._running = running
-        self._play_btn.setText(_STOP_GLYPH if running else _PLAY_GLYPH)
-        self._play_btn.setToolTip("중지" if running else "시작")
-        self._play_btn.setProperty("running", running)
-        # Re-polish so the [running] property selector takes effect.
-        self._play_btn.style().unpolish(self._play_btn)
-        self._play_btn.style().polish(self._play_btn)
+        self._play_btn.set_running(running)
         if running:
             self._health_timer.start()
         else:
@@ -291,8 +267,7 @@ class MainWindow(QWidget):
     def _on_expand(self) -> None:
         expanded = not self.is_expanded
         self._detail.setVisible(expanded)
-        self._expand_btn.setText("⌃" if expanded else "⌄")
-        self._expand_btn.setToolTip("접기" if expanded else "자세히 보기")
+        self._expand_btn.set_pointing_up(expanded)
         # Qt grows a window to fit new content but never shrinks it back, so collapsing would leave
         # the frame the expanded height with a row rattling around in it. The layout has to settle
         # first — hence the deferred resize rather than an immediate adjustSize().
