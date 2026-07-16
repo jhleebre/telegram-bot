@@ -290,6 +290,44 @@ already present. `claude` CLI is already installed (v2.1.187 verified).
   claude -p --resume <session_id> --output-format json
   ```
 
+### Writing Markdown: ranges take a hyphen, never a tilde (binding on every prompt)
+
+**Any prompt that makes the model produce Markdown *body* text must tell it to write ranges with a
+hyphen** — `1분기-3분기`, `10-20명`, `2026-2027년` — never the `~` that Korean prose normally uses.
+Carried today by `pdf_to_markdown.md` and `image_describe.md`; **increment 5's meeting-note prompt
+will need it too**, and `test_prompts.py` asserts it per template so a new one cannot forget.
+
+In GFM `~` is a strikethrough delimiter, and the failure is *pairing-based*, which is what makes it
+nasty. Measured against MarkNotes' own renderer (`marked`, `gfm: true`):
+
+| Input | Renders as |
+|-------|-----------|
+| `기간: 2026~2027년` (one tilde in the block) | fine — unpaired, so it stays literal |
+| `참석자 10~20명, 예산 5~6천만원` | `참석자 10<del>20명, 예산 5</del>6천만원` ❌ |
+| `\| 기간 \| 1분기~3분기, 10~20명 \|` (one table cell) | `1분기<del>3분기, 10</del>20명` ❌ |
+
+**A single range renders fine.** So the bug is invisible until a paragraph or table cell happens to
+carry two, at which point the text *between* them is silently eaten and both tildes disappear. You
+cannot reason locally about it — hence "always a hyphen" rather than "avoid it when it pairs".
+
+Two wrinkles the prompt wording has to handle:
+
+- **It contradicts "transcribe faithfully".** The PDF and image prompts both insist on verbatim
+  transcription, so they must say explicitly that the range separator is the *one* character allowed
+  to change — the tilde is notation, not content, and swapping it is the only way the range survives
+  rendering. Numbers, dates, and names still never change.
+- **It must not be over-applied.** A `~` that is not a range — `~/Projects`, a URL, anything inside
+  a code block (where inline formatting does not apply anyway) — stays exactly as it is.
+
+**Why this cannot live in `CLAUDE.md` for the bot.** The owner's `~/.claude/CLAUDE.md` carries the
+same rule for their own desktop/terminal Claude Code, but **the engine's hermetic flags mean it
+never reaches `claude -p`**. Verified: a `CLAUDE.md` demanding a token in every reply was obeyed by
+a plain `claude -p` and **ignored** under `--setting-sources ""` (the exact flags `ClaudeCLI` uses).
+That is the hermeticism of *Increment 1 (as built)* working as designed — the bot's output cannot
+drift with the owner's personal settings — and its price is that **every instruction the bot relies
+on must be in the prompt template itself.** The two places are independent by construction, not by
+oversight.
+
 ### Increment 1 (as built)
 
 Delivered: `engine/claude_cli.py`, `engine/parsing.py`, `engine/prompts/` (+ `text_enrich.md`),

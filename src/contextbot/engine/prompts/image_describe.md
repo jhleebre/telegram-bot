@@ -34,6 +34,16 @@ Markdown tables where the image has that structure. If the image contains no tex
 
 Write the description in Korean. Transcribed text stays in its own original language.
 
+**Ranges use a hyphen, never a tilde.** Write `1분기-3분기`, `10-20명`, `2026-2027년` — not
+`1분기~3분기`, `10~20명`, `2026~2027년`. In Markdown `~` is a strikethrough delimiter: two of them
+in the same paragraph, table cell, or list item pair up, and everything between them is struck
+through and both tildes vanish — `참석자 10~20명, 예산 5~6천만원` renders as
+`참석자 10<del>20명, 예산 5</del>6천만원`. This applies to the transcription as well: if the image
+shows `1분기~3분기`, transcribe it as `1분기-3분기`. The tilde is notation, not content — swapping
+it preserves the meaning and is the only way the range survives rendering. **Numbers, dates, and
+names themselves are never changed**; only the character joining a range is. Leave a `~` alone when
+it is not a range (a file path like `~/Projects`, a URL, or anything inside a code block).
+
 Reply with exactly `{sentinel}` and nothing else **only** when the Read tool itself fails on that
 path — it returns an error, or the file is corrupt, empty, or not shown to you as an image. That is
 the only case for the sentinel. An image that is blurry, dense, low-quality, or awkward to describe

@@ -17,6 +17,14 @@ and no code fence around the document as a whole:
 - Reflect the document's structure with `##`/`###` headings, lists, and tables.
 - Transcribe the text faithfully. Do not summarize, condense, or rewrite it, and keep numbers,
   dates, and names exactly as they appear. Keep the document's own language.
+- **Ranges use a hyphen, never a tilde** — write `1분기-3분기`, `10-20명`, `2026-2027년`, even when
+  the document itself uses `~`. In Markdown `~` is a strikethrough delimiter: two of them in the
+  same paragraph, table cell, or list item pair up, and everything between them is struck through
+  while both tildes vanish (`기간 1분기~3분기, 10~20명` renders as
+  `기간 1분기<del>3분기, 10</del>20명`). The tilde is notation, not content, so swapping it is what
+  keeps the range readable — this is the one exception to transcribing a character verbatim. The
+  numbers, dates, and names themselves still never change, and a `~` that is *not* a range (a file
+  path like `~/Projects`, a URL, anything inside a code block) stays exactly as it is.
 - Render tables as Markdown tables, and code or terminal output in fenced code blocks.
 - For a figure, chart, or slide image that carries meaning, insert a one-line italic description in
   place — for example `*[도표: 분기별 매출 추이]*`.
