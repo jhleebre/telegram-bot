@@ -1,7 +1,16 @@
-"""Main application window: a friendly card-based layout.
+"""Main application window: a compact status bar that expands on demand.
 
-Header + big status "face" + a prominent Start/Stop button + health and log cards. Styling is
-self-contained QSS so the look is consistent regardless of the system theme.
+**Collapsed is the normal state**, and it is one row — status dot, what the bot is doing, the
+Start/Stop button, and a one-line health summary. That is the whole app most of the time, because
+that is the whole question most of the time ("is it on, and is anything wrong?"). Expanding drops
+the full health panel and the activity log underneath it, which is where you go when the summary
+says something is wrong.
+
+The earlier layout showed all of it, always: a large centred status face, seven probe lines, and a
+log pane, in a window that was 600px of mostly-empty card. It also *blinked* — the face pulsed on a
+loop whenever the bot was working. Both are gone.
+
+Styling is self-contained QSS so the look is consistent regardless of the system theme.
 """
 
 from __future__ import annotations
@@ -10,6 +19,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QFrame,
+    QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QPushButton,
@@ -24,8 +34,6 @@ from .status_widget import StatusWidget
 
 _HEALTH_INTERVAL_MS = 15_000
 _MAX_LOG_BLOCKS = 500
-# A floor only — the panel's real height is derived from the probes it is showing (_show_health).
-_HEALTH_MIN_HEIGHT = 96
 
 _STYLESHEET = """
 #root {
@@ -34,26 +42,31 @@ _STYLESHEET = """
 QFrame.card {
     background-color: #ffffff;
     border: 1px solid #e6e9f2;
-    border-radius: 16px;
+    border-radius: 14px;
 }
 QLabel#cardTitle {
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
     color: #9aa0b5;
 }
 QLabel#tagline {
-    font-size: 13px;
+    font-size: 12px;
     color: #7b8199;
 }
+QLabel#healthSummary {
+    font-size: 12px;
+    font-weight: 600;
+    color: #3a3f57;
+}
 QLabel#health {
-    font-size: 13px;
+    font-size: 12px;
     color: #3a3f57;
 }
 #toggle {
     border: none;
-    border-radius: 26px;
-    padding: 14px 20px;
-    font-size: 16px;
+    border-radius: 15px;
+    padding: 7px 16px;
+    font-size: 13px;
     font-weight: 800;
     color: #ffffff;
     background-color: #2ecc71;
@@ -61,11 +74,19 @@ QLabel#health {
 #toggle:hover { background-color: #29b765; }
 #toggle[running="true"] { background-color: #e74c3c; }
 #toggle[running="true"]:hover { background-color: #d1412f; }
+#expand {
+    border: none;
+    background: transparent;
+    color: #9aa0b5;
+    font-size: 14px;
+    padding: 4px 6px;
+}
+#expand:hover { color: #3a3f57; }
 QPlainTextEdit#log {
     background-color: #1e2233;
     color: #cdd3ea;
     border: none;
-    border-radius: 12px;
+    border-radius: 10px;
     padding: 8px;
 }
 """
@@ -76,8 +97,8 @@ def _card(title: str) -> tuple[QFrame, QVBoxLayout]:
     frame.setProperty("class", "card")
     frame.setFrameShape(QFrame.NoFrame)
     layout = QVBoxLayout(frame)
-    layout.setContentsMargins(16, 12, 16, 14)
-    layout.setSpacing(8)
+    layout.setContentsMargins(14, 10, 14, 12)
+    layout.setSpacing(6)
     heading = QLabel(title)
     heading.setObjectName("cardTitle")
     layout.addWidget(heading)
@@ -93,65 +114,76 @@ class MainWindow(QWidget):
         self.setObjectName("root")
         self.setWindowTitle("🤖 Context Bot")
         self.setStyleSheet(_STYLESHEET)
-        # Width only. A fixed minimum *height* (it was 620) is a promise about how much content
-        # there is, and increment 5 broke it by adding two probes: 620 is below what the layout
-        # needs, so Qt squeezed the cards past their own minimums and clipped the bottom of the
-        # health panel — `whisper-stt` and `glossary` gone, `claude-engine` cut off mid-path.
-        # Without it, the layout's own minimumSizeHint is the floor, so the window can never be
-        # smaller than the thing it has to show.
-        self.setMinimumWidth(420)
+        # Width only. A fixed minimum *height* is a promise about how much content there is, and
+        # this window's content now changes size by design — collapsed it is one row, expanded it is
+        # seven probes and a log. Letting the layout's own minimumSizeHint be the floor is what makes
+        # both fit; a constant here previously clipped the health panel's last two probes silently.
+        self.setMinimumWidth(460)
 
-        # Status card (big friendly face).
-        status_card, status_layout = _card("STATUS")
+        # ---- the collapsed row: everything the owner normally needs, and nothing else.
         self._status_widget = StatusWidget()
-        status_layout.addWidget(self._status_widget)
 
-        # Prominent toggle button.
         self._toggle_btn = QPushButton("▶  Start")
         self._toggle_btn.setObjectName("toggle")
         self._toggle_btn.setCursor(Qt.PointingHandCursor)
         self._toggle_btn.setProperty("running", False)
         self._toggle_btn.clicked.connect(self._on_toggle)
 
-        # Health card.
+        self._health_summary = QLabel("—")
+        self._health_summary.setObjectName("healthSummary")
+
+        self._expand_btn = QPushButton("⌄")
+        self._expand_btn.setObjectName("expand")
+        self._expand_btn.setCursor(Qt.PointingHandCursor)
+        self._expand_btn.setToolTip("자세히 보기")
+        self._expand_btn.clicked.connect(self._on_expand)
+
+        bar, bar_layout = _card("")
+        bar_layout.setContentsMargins(12, 8, 8, 8)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(self._status_widget, 1)
+        row.addWidget(self._toggle_btn)
+        row.addWidget(self._health_summary)
+        row.addWidget(self._expand_btn)
+        bar_layout.addLayout(row)
+
+        # ---- the detail, hidden until asked for.
+        self._detail = QWidget()
+        detail_layout = QVBoxLayout(self._detail)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(12)
+
         health_card, health_layout = _card("HEALTH")
         self._health_label = QLabel("아직 확인 전이에요")
         self._health_label.setObjectName("health")
-        self._health_label.setFont(QFont("Menlo", 12))
+        self._health_label.setFont(QFont("Menlo", 11))
         self._health_label.setWordWrap(True)
-        # The panel sizes itself to the probes, rather than to a number someone guessed once.
-        # It was a flat 96px — "room for the 4 probe lines" — and increment 5's two new probes
-        # (whisper-stt, glossary) fell off the bottom, invisible, while claude-engine was cut off
-        # mid-path. That is not cosmetic: the *whole point* of the whisper-stt probe is that the
-        # owner sees "model not downloaded" **before** they send a recording, and its message is the
-        # longest line the panel ever shows. A probe you cannot read is the failure it exists to
-        # prevent. A word-wrapped QLabel does not report its wrapped height to a layout unless
-        # height-for-width is enabled, so a long path silently ate the lines below it.
         policy = self._health_label.sizePolicy()
         policy.setVerticalPolicy(QSizePolicy.MinimumExpanding)
         policy.setHeightForWidth(True)
         self._health_label.setSizePolicy(policy)
-        self._health_label.setMinimumHeight(_HEALTH_MIN_HEIGHT)
         self._health_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         health_layout.addWidget(self._health_label)
+        detail_layout.addWidget(health_card)
 
-        # Log card.
         log_card, log_layout = _card("ACTIVITY")
         self._log_view = QPlainTextEdit()
         self._log_view.setObjectName("log")
         self._log_view.setReadOnly(True)
         self._log_view.setMaximumBlockCount(_MAX_LOG_BLOCKS)
         self._log_view.setFont(QFont("Menlo", 10))
-        self._log_view.setMinimumHeight(120)
+        self._log_view.setMinimumHeight(160)
         log_layout.addWidget(self._log_view)
+        detail_layout.addWidget(log_card, 1)
+
+        self._detail.setVisible(False)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 20)
-        layout.setSpacing(14)
-        layout.addWidget(status_card)
-        layout.addWidget(self._toggle_btn)
-        layout.addWidget(health_card)
-        layout.addWidget(log_card, 1)  # the log absorbs resizing; other cards keep their size
+        layout.setContentsMargins(14, 12, 14, 14)
+        layout.setSpacing(12)
+        layout.addWidget(bar)
+        layout.addWidget(self._detail, 1)
 
         # Wire worker signals.
         worker.status_changed.connect(self._on_status_changed)
@@ -165,6 +197,10 @@ class MainWindow(QWidget):
         self._health_timer.timeout.connect(self._worker.request_health)
 
     # ------------------------------------------------------------- helpers
+    @property
+    def is_expanded(self) -> bool:
+        return self._detail.isVisible()
+
     def _set_running_style(self, running: bool) -> None:
         self._running = running
         self._toggle_btn.setText("■  Stop" if running else "▶  Start")
@@ -177,25 +213,35 @@ class MainWindow(QWidget):
         else:
             self._health_timer.stop()
 
-    def _show_health(self, text: str) -> None:
-        """Show the health report, and make the panel tall enough to actually show it.
+    def _show_health(self, summary: str, detail: str) -> None:
+        """Show the health report: one line always, the probes when expanded.
 
-        The height is taken from the text rather than reserved in advance. It used to be a flat
-        96px — "room for the 4 probe lines" — and increment 5's two extra probes simply fell off
-        the bottom: `whisper-stt` and `glossary` invisible, `claude-engine` cut off mid-path. A
-        word-wrapped QLabel does not tell a layout how tall it needs to be, so a long path silently
-        ate the lines below it — and the probe whose entire job is to be *read before you send a
-        recording* was the one that vanished.
-
-        Deriving the height means the next probe cannot reintroduce this. A bigger constant would
-        only postpone it, which is exactly how the 96 got there.
+        The panel's height comes from the text rather than being reserved in advance. It used to be
+        a flat 96px — "room for the 4 probe lines" — and increment 5's two extra probes fell off the
+        bottom, invisible: a word-wrapped QLabel does not tell a layout how tall it needs to be, so
+        a long path silently ate the lines below it. The probe whose whole job is to be read before
+        you send a recording was the first to vanish.
         """
+        self._health_summary.setText(summary)
         label = self._health_label
-        label.setText(text)
+        label.setText(detail)
         width = label.width() or label.sizeHint().width()
-        label.setMinimumHeight(max(_HEALTH_MIN_HEIGHT, label.heightForWidth(width)))
+        label.setMinimumHeight(label.heightForWidth(width))
 
     # ------------------------------------------------------------- UI actions
+    def _on_expand(self) -> None:
+        expanded = not self.is_expanded
+        self._detail.setVisible(expanded)
+        self._expand_btn.setText("⌃" if expanded else "⌄")
+        self._expand_btn.setToolTip("접기" if expanded else "자세히 보기")
+        # Qt grows a window to fit new content but never shrinks it back, so collapsing would leave
+        # the frame the expanded height with a row rattling around in it. The layout has to settle
+        # first — hence the deferred resize rather than an immediate adjustSize().
+        QTimer.singleShot(0, self._shrink_to_fit)
+
+    def _shrink_to_fit(self) -> None:
+        self.resize(self.width(), self.sizeHint().height())
+
     def _on_toggle(self) -> None:
         if self._running:
             self._worker.stop_bot()

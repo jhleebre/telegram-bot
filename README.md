@@ -13,8 +13,8 @@ It uses **two Telegram channels for two jobs**:
   bot chat. Replying *into* Saved Messages would loop, so replies use the separate bot channel.
 
 The bot **does not run in the background** — it only reads while the desktop app window is open.
-A small PySide6 window shows live status (stopped / starting / running / processing / error) and a
-health panel.
+The window is a single compact row: a status dot, what the bot is doing, Start/Stop, and a one-line
+health summary. Expand it (`⌄`) when you want the full health panel and the activity log.
 
 ## Why this design
 
@@ -136,12 +136,16 @@ you enter your own credentials.)
 .venv/bin/python run.py
 ```
 
-The window opens with a **gray 😴 (stopped)** status face. Click **Start**; the face turns
-**green 🤖 (running)** once health checks pass (telethon auth ✓, bot token ✓, inbox ✓, connected ✓,
-claude-engine ✓).
+The window opens as one row with a **gray 😴 (stopped)** dot. Click **Start**; it turns
+**green 🤖 (running)** once the health checks pass, and the health summary reads `🟢 정상`.
 
-The **claude-engine** probe shows the resolved CLI path and model. If it reports *not found*,
-health is **degraded, not error**: notes are still captured, just without LLM title/tags/summary.
+That summary is the whole point of the collapsed view: when something is wrong it names the probe
+(`🟡 whisper-stt`) rather than making you expand to find out. Click `⌄` for the details — all seven
+probes and the activity log — and `⌃` to shrink back.
+
+Most failures are **degraded, not error**: a missing `claude` CLI still captures notes (just without
+LLM titles/tags), and a missing Whisper model only stops audio. The **claude-engine** probe shows the
+resolved CLI path and model; **whisper-stt** shows the model and the resolved `ffmpeg`.
 
 Now open Telegram and send a text to **Saved Messages** ("note to self"). A `.md` note appears in
 your inbox and your **bot DM** replies `📝 저장됨: <filename>`. Close the window to stop reading.

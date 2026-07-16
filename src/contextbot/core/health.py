@@ -18,6 +18,13 @@ class HealthStatus(str, Enum):
     ERROR = "error"
 
 
+_ICONS = {
+    HealthStatus.HEALTHY: "🟢",
+    HealthStatus.DEGRADED: "🟡",
+    HealthStatus.ERROR: "🔴",
+}
+
+
 @dataclass
 class ProbeResult:
     name: str
@@ -36,12 +43,24 @@ class HealthReport:
                 return p
         return None
 
+    def summary(self) -> str:
+        """One line: the state, and **which** probes are unhappy.
+
+        This is all the collapsed window shows, so it has to be worth not expanding. A summary that
+        said only `🟡` would make the owner click to learn anything at all — and the probe most
+        worth reading (`whisper-stt` saying the model is missing) is exactly the one they would
+        otherwise never think to look for.
+
+        Naming the failing probes even when the overall is green is deliberate: `connection` does
+        not degrade the overall, but "the bot is not connected" is still the most interesting thing
+        on the panel when it is true.
+        """
+        icon = _ICONS[self.overall]
+        failing = [p.name for p in self.probes if not p.ok]
+        return f"{icon} {', '.join(failing)}" if failing else f"{icon} 정상"
+
     def as_text(self) -> str:
-        icon = {
-            HealthStatus.HEALTHY: "🟢",
-            HealthStatus.DEGRADED: "🟡",
-            HealthStatus.ERROR: "🔴",
-        }[self.overall]
+        icon = _ICONS[self.overall]
         lines = [f"{icon} Health: {self.overall.value}"]
         for p in self.probes:
             mark = "✅" if p.ok else "❌"
