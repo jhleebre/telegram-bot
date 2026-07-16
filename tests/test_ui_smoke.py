@@ -29,12 +29,12 @@ def test_status_widget_reflects_status(qtbot):
     qtbot.addWidget(widget)
 
     widget.set_status(BotStatus.RUNNING, "실행 중")
-    assert widget._message_text == "실행 중"
+    assert widget._message.full_text() == "실행 중"
     assert STATUS_COLORS[BotStatus.RUNNING] in widget._light.styleSheet()
     assert STATUS_EMOJI[BotStatus.RUNNING] == widget._light.text()
 
     widget.set_status_value(BotStatus.ERROR.value, "boom")
-    assert widget._message_text == "boom"
+    assert widget._message.full_text() == "boom"
     assert STATUS_COLORS[BotStatus.ERROR] in widget._light.styleSheet()
 
 
@@ -45,7 +45,7 @@ def test_the_status_falls_back_to_its_tagline(qtbot):
 
     widget.set_status(BotStatus.STOPPED, "")
 
-    assert widget._message_text == STATUS_TAGLINES[BotStatus.STOPPED]
+    assert widget._message.full_text() == STATUS_TAGLINES[BotStatus.STOPPED]
 
 
 class StubWorker(QObject):
@@ -90,7 +90,7 @@ def test_main_window_toggle_and_signals(qtbot):
 
     # Status signal updates the widget.
     worker.status_changed.emit(BotStatus.RUNNING.value, "실행 중")
-    assert window._status_widget._message_text == "실행 중"
+    assert window._status_widget._message.full_text() == "실행 중"
 
     # Stop
     window._on_toggle()
@@ -159,18 +159,43 @@ def test_the_health_panel_shows_every_probe_it_is_given(qtbot):
     )
 
 
-def test_the_window_has_no_fixed_minimum_height(qtbot):
-    """The layout owns its own floor.
+def test_the_window_sets_no_explicit_minimum_size(qtbot):
+    """The layout owns its own floor, in both directions.
 
-    A hardcoded minimum height is a promise about how much content there is, and adding a probe
-    breaks it silently — which is exactly how the panel above came to be clipped. Letting
-    minimumSizeHint be the floor means the next probe cannot reintroduce it.
+    A hardcoded minimum is a promise about how much content there is, and it has been wrong three
+    times: it does not shrink the window, it lets Qt squeeze the children past their own minimums
+    and clip them, silently. 620px hid the health panel's last two probes (the layout wanted 768);
+    460px hid the expand button and half the health summary (the row wants ~592). The layout knows
+    both numbers already, so it must be the one that decides.
     """
     window = MainWindow(StubWorker())
     qtbot.addWidget(window)
 
-    assert window.minimumHeight() == 0, "a fixed minimum height lets the window clip its own content"
-    assert window.minimumWidth() > 0, "width still needs a floor — the text is monospaced paths"
+    assert window.minimumWidth() == 0, "an explicit minimum width lets the row clip itself"
+    assert window.minimumHeight() == 0, "an explicit minimum height lets the panel clip itself"
+    # …and the layout's own floor is a real, usable window rather than nothing.
+    assert window.minimumSizeHint().width() >= 500
+
+
+def test_the_collapsed_row_fits_at_the_smallest_allowed_width(qtbot):
+    """Everything in the row must be on screen at the layout's own minimum — including the expand
+    button, which is the only way to reach the detail that explains a failing summary."""
+    window = MainWindow(StubWorker())
+    qtbot.addWidget(window)
+    window.show()
+    window._health_summary.setText("🟡 whisper-stt")
+    window.resize(window.minimumSizeHint().width(), window.sizeHint().height())
+    qtbot.wait(50)
+
+    bar = window._status_widget.parentWidget()
+    for name, widget in [
+        ("status", window._status_widget),
+        ("button", window._toggle_btn),
+        ("health", window._health_summary),
+        ("expand", window._expand_btn),
+    ]:
+        right = widget.geometry().x() + widget.geometry().width()
+        assert right <= bar.width(), f"{name} overflows the bar: ends at {right}, bar is {bar.width()}"
 
 
 # ------------------------------------------------- the collapsed window
@@ -259,7 +284,7 @@ def test_a_long_message_elides_rather_than_clipping(qtbot):
     widget.set_status(BotStatus.RUNNING, "아주 " * 40 + "긴 메시지입니다")
 
     shown = widget._message.text()
-    assert shown != widget._message_text, "it must not try to show the whole thing"
+    assert shown != widget._message.full_text(), "it must not try to show the whole thing"
     assert "…" in shown, f"expected an ellipsis, got {shown!r}"
 
 
@@ -277,3 +302,66 @@ def test_the_full_message_survives_elision(qtbot):
     qtbot.wait(20)
 
     assert widget._message.text().endswith("긴 메시지입니다"), "widening must restore the full text"
+
+
+def test_the_row_is_padded_symmetrically(qtbot):
+    """The owner's eye beat my first measurement, which mixed two coordinate systems and read
+    16/21 for what was really 28 above and 9 below.
+
+    Two things made the top loose: the bar was built with `_card("")`, whose empty title label
+    padded it for nothing, and the window layout then handed the bar the *hidden* detail panel's
+    stretch, so it grew past its own sizeHint and dumped the slack inside itself.
+    """
+    window = MainWindow(StubWorker())
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.wait(50)
+
+    bar = window._status_widget.parentWidget()
+    for name, widget in [
+        ("status", window._status_widget),
+        ("button", window._toggle_btn),
+        ("health", window._health_summary),
+    ]:
+        box = widget.geometry()   # parent-relative, so y *is* the padding above it
+        above, below = box.y(), bar.height() - (box.y() + box.height())
+        assert above == below, f"{name}: {above}px above, {below}px below"
+
+
+def test_the_row_does_not_reflow_as_its_contents_change(qtbot):
+    """A status bar that rearranges itself while you read it is worse than one that wastes a few
+    pixels. Sized to content, `🟢 정상` → `🟡 whisper-stt` shoved the Start button 51px left, and
+    Start → Stop twitched it another 2."""
+    window = MainWindow(StubWorker())
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.wait(50)
+
+    positions = set()
+    for message, health, running in [
+        ("", "🟢 정상", False),
+        ("회의록 초안 작성 중…", "🟡 whisper-stt", True),
+        ("아주 " * 40, "🔴 telethon-auth, bot-token, inbox", True),
+    ]:
+        window._status_widget.set_status(BotStatus.RUNNING, message)
+        window._health_summary.setText(health)
+        window._set_running_style(running)
+        qtbot.wait(20)
+        positions.add(
+            (window._toggle_btn.x(), window._toggle_btn.width(),
+             window._health_summary.x(), window._health_summary.width())
+        )
+
+    assert len(positions) == 1, f"the row moved: {positions}"
+
+
+def test_the_window_opens_at_the_size_its_content_wants(qtbot):
+    """`show()` gives a top-level window a default initial height rather than its sizeHint, and
+    `adjustSize()` does not undo it — which left dead space under the bar on startup: exactly the
+    lopsided padding this row was tightened to remove."""
+    window = MainWindow(StubWorker())
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.wait(50)
+
+    assert window.height() == window.sizeHint().height()

@@ -12,12 +12,21 @@ colour already says without moving. Kept UI-only; all state comes from :class:`B
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 from ..core.status import STATUS_COLORS, STATUS_EMOJI, STATUS_TAGLINES, BotStatus
+from .elided_label import ElidedLabel
 
 _DOT_SIZE = 30
+# The row's one elastic column: it reserves this much and takes whatever else is going. Everything
+# beside it is fixed-width, so this is the only thing that changes size — which is the point (see
+# main_window's row).
+#
+# Measured against the taglines rather than picked: the longest is 188px ("문제가 생겼어요 — 로그를
+# 확인해주세요"). Below that, the *default* window would open with its own status message already
+# elided, which is a strange thing for an app to do to itself. Live messages can still be longer,
+# and those elide — that is what the column is elastic for.
+_MESSAGE_MIN_WIDTH = 200
 
 
 class StatusWidget(QWidget):
@@ -38,14 +47,13 @@ class StatusWidget(QWidget):
         # same thing as the dot it sat next to and then squeezed the message that actually carries
         # news into an ellipsis. The dot's colour and emoji are the state; this says what the bot is
         # doing about it.
-        #
-        # It takes whatever width is left and elides, so a long message can never push the button or
-        # the health line off the row.
-        self._message = QLabel()
+        self._message = ElidedLabel()
         self._message.setObjectName("tagline")
+        # `Ignored` so it may shrink below its own text (a QLabel's minimum width is the whole
+        # string, so anything else would shove its neighbours off the row rather than elide), and an
+        # explicit minimum so the row still reserves a readable amount for it.
         self._message.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        # The full text, kept because the label only ever holds an elided copy of it.
-        self._message_text = ""
+        self._message.setMinimumWidth(_MESSAGE_MIN_WIDTH)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -63,28 +71,9 @@ class StatusWidget(QWidget):
         )
         self._light.setText(STATUS_EMOJI[status])
 
-    def _apply_message(self) -> None:
-        """Fit the message to whatever width is left, with an ellipsis.
-
-        A `QLabel` does not elide — it simply clips, mid-character, which reads as a rendering bug
-        rather than as "there is more text here". The row deliberately gives this the leftover
-        space (the button and the health line are fixed), so it is the part that has to yield.
-        """
-        metrics = QFontMetrics(self._message.font())
-        width = self._message.width()
-        self._message.setText(
-            metrics.elidedText(self._message_text, Qt.ElideRight, width) if width > 0
-            else self._message_text
-        )
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
-        super().resizeEvent(event)
-        self._apply_message()
-
     def set_status(self, status: BotStatus, message: str = "") -> None:
         self._apply_face(status)
-        self._message_text = message or STATUS_TAGLINES[status]
-        self._apply_message()
+        self._message.setText(message or STATUS_TAGLINES[status])
 
     def set_status_value(self, status_value: str, message: str = "") -> None:
         """Convenience for the signal payload (status is passed as its string value)."""

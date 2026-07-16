@@ -30,10 +30,26 @@ from PySide6.QtWidgets import (
 
 from ..core.status import BotStatus
 from .bot_worker import BotWorker
+from .elided_label import ElidedLabel
 from .status_widget import StatusWidget
 
 _HEALTH_INTERVAL_MS = 15_000
 _MAX_LOG_BLOCKS = 500
+
+# The collapsed row's columns are **fixed**, and that is the whole point of these numbers. Sized to
+# content, every column moved whenever anything changed: `🟢 정상` → `🟡 whisper-stt` shoved the
+# Start button 51px left, and `▶ Start` → `■ Stop` twitched it another 2px. A status bar that
+# rearranges itself while you read it is worse than one that wastes a little space, so each column
+# is wide enough for its worst case and the message column absorbs all the slack.
+_BUTTON_WIDTH = 96      # fits "▶  Start" and "■  Stop" identically
+_HEALTH_WIDTH = 150     # fits "🟡 whisper-stt"; longer lists elide (the tooltip and ⌄ have them all)
+_EXPAND_WIDTH = 26
+
+# Symmetric, and tight. The bar used to be built with `_card("")` — an empty heading label plus its
+# spacing, padding the top for nothing — and then the window layout handed it the *hidden* detail
+# panel's stretch, so it grew past its own sizeHint and dumped the slack underneath: 16px above the
+# row, 21px below. Both are gone: no heading, and the bar is Fixed vertically.
+_BAR_MARGIN = 8
 
 _STYLESHEET = """
 #root {
@@ -114,11 +130,12 @@ class MainWindow(QWidget):
         self.setObjectName("root")
         self.setWindowTitle("🤖 Context Bot")
         self.setStyleSheet(_STYLESHEET)
-        # Width only. A fixed minimum *height* is a promise about how much content there is, and
-        # this window's content now changes size by design — collapsed it is one row, expanded it is
-        # seven probes and a log. Letting the layout's own minimumSizeHint be the floor is what makes
-        # both fit; a constant here previously clipped the health panel's last two probes silently.
-        self.setMinimumWidth(460)
+        # **No explicit minimum size, in either direction.** The layout's own minimumSizeHint is the
+        # floor, and every attempt to second-guess it here has been the same bug three times over: a
+        # constant smaller than what the content needs does not shrink the window, it lets Qt squeeze
+        # the children past their own minimums and clip them, silently. It hid the health panel's
+        # last two probes at 620 (the layout wanted 768), and then hid the expand button and half the
+        # health summary at 460 (the row wants 592). The layout already knows both numbers.
 
         # ---- the collapsed row: everything the owner normally needs, and nothing else.
         self._status_widget = StatusWidget()
@@ -127,26 +144,35 @@ class MainWindow(QWidget):
         self._toggle_btn.setObjectName("toggle")
         self._toggle_btn.setCursor(Qt.PointingHandCursor)
         self._toggle_btn.setProperty("running", False)
+        self._toggle_btn.setFixedWidth(_BUTTON_WIDTH)
         self._toggle_btn.clicked.connect(self._on_toggle)
 
-        self._health_summary = QLabel("—")
+        self._health_summary = ElidedLabel("—")
         self._health_summary.setObjectName("healthSummary")
+        self._health_summary.setFixedWidth(_HEALTH_WIDTH)
 
         self._expand_btn = QPushButton("⌄")
         self._expand_btn.setObjectName("expand")
         self._expand_btn.setCursor(Qt.PointingHandCursor)
         self._expand_btn.setToolTip("자세히 보기")
+        self._expand_btn.setFixedWidth(_EXPAND_WIDTH)
         self._expand_btn.clicked.connect(self._on_expand)
 
-        bar, bar_layout = _card("")
-        bar_layout.setContentsMargins(12, 8, 8, 8)
-        row = QHBoxLayout()
+        # Built by hand rather than with `_card`: that helper adds a title label, and a card whose
+        # title is "" is an empty label silently padding the top of the row.
+        bar = QFrame()
+        bar.setProperty("class", "card")
+        bar.setFrameShape(QFrame.NoFrame)
+        # Fixed height, or the layout gives it the hidden detail panel's stretch and it grows past
+        # its own sizeHint — with the slack landing under the row, not around it.
+        bar.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(12, _BAR_MARGIN, _BAR_MARGIN, _BAR_MARGIN)
         row.setSpacing(10)
         row.addWidget(self._status_widget, 1)
         row.addWidget(self._toggle_btn)
         row.addWidget(self._health_summary)
         row.addWidget(self._expand_btn)
-        bar_layout.addLayout(row)
 
         # ---- the detail, hidden until asked for.
         self._detail = QWidget()
@@ -195,6 +221,13 @@ class MainWindow(QWidget):
         self._health_timer = QTimer(self)
         self._health_timer.setInterval(_HEALTH_INTERVAL_MS)
         self._health_timer.timeout.connect(self._worker.request_health)
+
+        # Open at the size the content actually wants. `show()` gives a top-level window a default
+        # initial height (100px here) rather than its sizeHint (74), and `adjustSize()` does not
+        # undo it — which left 26px of dead space under the bar on startup, i.e. exactly the
+        # lopsided padding this row was tightened to remove. Deferred for the same reason the
+        # collapse is: the layout has to settle first.
+        QTimer.singleShot(0, self._shrink_to_fit)
 
     # ------------------------------------------------------------- helpers
     @property
