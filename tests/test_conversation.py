@@ -906,3 +906,32 @@ async def test_a_preamble_on_a_revision_does_not_corrupt_the_note(live, store):
 
     assert store.pending().title == "고친 제목"
     assert store.pending().draft == "## 결정사항\n\n고친 내용."
+
+
+async def test_promotion_never_asks_about_a_draft_that_does_not_exist_yet(live, store):
+    """The race the queue creates, and it is entirely plausible.
+
+    A producer creates its entry QUEUED and *then* spends minutes drafting. If the owner answers the
+    open review during that window — reading it on their phone while the second recording is still
+    transcribing — the review ends and promotion fires against a review whose turn is still in
+    flight. Both halves lose: the owner gets "초안이 준비됐습니다" with an empty body, and the
+    producer then writes its own object back over the activation, leaving a finished draft QUEUED
+    with nothing pending. The poller stops, and nobody is asked until the next restart.
+    """
+    store.create(message_id=8, session_id="s-8", title="회의록 작성 중", source_date=DATE)  # mid-draft
+
+    assert promote_next(store) is None
+    assert store.pending() is None
+
+
+async def test_promotion_skips_the_in_flight_one_and_takes_the_ready_one(store):
+    store.create(message_id=8, session_id="s-8", title="아직 작성 중", source_date=DATE)
+    ready = store.create(message_id=9, session_id="s-9", title="준비된 회의록", source_date=DATE)
+    ready.write_draft("## Overview\n\n초안입니다.")
+    store.update(ready)
+
+    reply = promote_next(store)
+
+    assert "준비된 회의록" in reply
+    assert store.pending().message_id == 9
+    assert "뒤에" not in reply  # the in-flight one is not "waiting", it is unfinished

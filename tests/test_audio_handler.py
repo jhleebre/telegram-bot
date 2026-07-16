@@ -503,3 +503,36 @@ async def test_a_replayed_recording_gets_a_review_after_the_crashed_one_is_disca
 
     assert "대기" not in result.reply
     assert store.pending().draft
+
+
+async def test_a_crash_mid_download_does_not_leave_a_truncated_recording_to_reuse(
+    live, store, fake_stt
+):
+    """The cache trusts exactly one state: a finished download **and** its transcript.
+
+    A DeferMessage leaves both. A *crash* mid-download leaves a truncated .m4a and no transcript —
+    and ffmpeg will happily decode the valid prefix of one, so reusing it would transcribe half a
+    meeting into a confident, complete-looking note. Nothing would raise.
+    """
+    stage = stage_dir(live)
+    stage.mkdir(parents=True)
+    (stage / "meeting.m4a").write_bytes(b"truncated half-written download")  # no transcript beside it
+
+    await handle_audio(audio_message(), live, engine=FakeEngine(), store=store)
+
+    # It re-downloaded rather than reusing the wreckage, and Whisper saw that same file (it is the
+    # one the handler then moved into the review's tree).
+    assert len(fake_stt) == 1
+    assert (store.pending().audio_dir / "meeting.m4a").read_bytes() == b"fake audio bytes"
+
+
+async def test_a_leftover_download_is_reused_when_its_transcript_is_there(live, store, fake_stt):
+    """…and the deferral's own state still short-circuits both steps."""
+    stage = stage_dir(live)
+    stage.mkdir(parents=True)
+    (stage / "meeting.m4a").write_bytes(b"already downloaded")
+    (stage / "transcript.txt").write_text("이미 만들어진 전사본입니다.", encoding="utf-8")
+
+    await handle_audio(audio_message(), live, engine=FakeEngine(), store=store)
+
+    assert fake_stt == [], "neither the download nor Whisper should run again"

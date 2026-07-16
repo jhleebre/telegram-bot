@@ -155,6 +155,15 @@ async def handle_audio(
     """A sent recording → transcript → drafted meeting note → the owner's review."""
     store = store or build_store(settings)
     stage = _stage_dir(settings, message.message_id)
+
+    # The staging dir is only trustworthy in the **one** state a deferral leaves it in: a finished
+    # download *and* its transcript. Any other leftover is a previous attempt that died partway —
+    # and a crash mid-download leaves a **truncated** recording, which ffmpeg will happily decode
+    # the valid prefix of. Reusing that transcribes half a meeting into a confident, complete-looking
+    # note, with nothing raised anywhere. The transcript's presence is the signal, because it only
+    # exists once transcription finished; without it, start clean.
+    if not (stage / _TRANSCRIPT_NAME).is_file():
+        _cleanup(stage)
     stage.mkdir(parents=True, exist_ok=True)
 
     try:

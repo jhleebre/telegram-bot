@@ -342,7 +342,14 @@ def promote_next(store: SessionStore) -> str | None:
     """
     if store.has_pending():
         return None
-    queue = store.queued()
+    # Only a review that **has its draft**. A producer creates its entry QUEUED and then spends
+    # minutes drafting, so the queue also contains work still in flight — and promoting that races
+    # the producer for the same entry. Both halves lose: the owner gets "초안이 준비됐습니다" with an
+    # empty body (the draft file does not exist yet), and the producer then writes its own object
+    # back over the activation, leaving a finished draft QUEUED with nothing pending — so the poller
+    # stops and nobody is asked until the next restart. The draft file is the same signal
+    # `discard_incomplete` trusts: only a completed turn creates it.
+    queue = [review for review in store.queued() if review.draft_path.exists()]
     if not queue:
         return None
     review = queue[0]

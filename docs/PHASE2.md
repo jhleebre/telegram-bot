@@ -14,7 +14,7 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > increments 2–3 use) → *Increment 4 (as built)* (the review state machine) → *The decisions,
 > settled* → *Increment 5 (as built)* (audio, the queue, and the two silent bugs only real runs
 > found).
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **573 passing**, no network or model runs.
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **577 passing**, no network or model runs.
 >
 > **Phase 2 is complete.** Every pipeline in *Scope* is shipped and owner-verified. The one thing
 > deliberately left open is **open decision 6** (should the bot DM answer when nobody asked it
@@ -1236,8 +1236,8 @@ Delivered: `stt/whisper.py` (the port) + `scripts/download_model.py`, `files/glo
 `handlers/audio_handler.py` (the producer), `engine/prompts/meeting_note.md` +
 `meeting_glossary.md`, the queue in `core/session_store.py` (`ReviewState.QUEUED`, `note_type`,
 `tags`), `conversation.activate` / `promote_next` / `_accept`, the `whisper-stt` and `glossary`
-health probes, five settings, and the **deletion of the `#검토` scaffolding**. Suite: 474 → **573**
-(the count *drops* against the peak of 601 because the scaffolding's tests went with it).
+health probes, five settings, and the **deletion of the `#검토` scaffolding**. Suite: 474 → **577**
+(it peaked at 601 and *drops* here, because the scaffolding's ~28 tests went with their subject).
 
 **The decisions above all held.** What follows is what building it changed or found.
 
@@ -1297,6 +1297,32 @@ Both live in the **shared** path, so the revise turn gets them too — which mat
 looks: the real correction run proved the revise turn *does* re-emit the `태그:` line that
 `split_tags` exists to catch. Had that been producer-only, the first correction to any meeting note
 would have written `태그: …` into the note body.
+
+#### Two more from reviewing this increment's own diff — the same trick increment 4 got three from
+
+Neither is reachable from a test that was not written for it, and both are silent.
+
+1. **The promotion race, and it is entirely plausible.** A producer creates its entry `QUEUED` and
+   *then* spends minutes drafting — so the queue also holds work **still in flight**. If the owner
+   answers the open review during that window (reading it on their phone while the second recording
+   is still transcribing — i.e. exactly what happens when two recordings arrive together), the
+   review ends, promotion fires against the unfinished one, and **both halves lose**: the owner gets
+   `📝 초안이 준비됐습니다` with an *empty body* (the draft file does not exist yet), and the producer
+   then writes its own object back over the activation — leaving a finished draft `QUEUED` with
+   nothing pending, so the poller stops and nobody is asked until the next restart. `promote_next`
+   now promotes only a review whose **draft file exists**, which is the same signal
+   `discard_incomplete` already trusts: only a completed turn creates it.
+2. **A crash mid-download poisons the transcript cache.** `_download` reused whatever was in the
+   staging dir. A `DeferMessage` leaves a *finished* download and its transcript — the state the
+   cache is for — but a **crash** leaves a truncated `.m4a` and no transcript, and ffmpeg will
+   happily decode the valid prefix of one. The replay would transcribe half a meeting into a
+   confident, complete-looking note. The staging dir is now trusted **only** when the transcript is
+   there beside the audio; anything else is wiped and re-fetched.
+
+Both are the increment's own machinery producing the failure it exists to prevent — which is what
+increment 4 said about its own three (*"silent strandings of exactly the kind the state machine
+exists to prevent, reintroduced by the machinery meant to prevent them"*). That is now **seven
+bugs across two increments** found by reading the diff rather than by running it. Budget for it.
 
 #### Points worth knowing before touching this
 
@@ -1560,5 +1586,5 @@ means; `test_client_service.py` the promotion wiring; `test_health.py` the `whis
 `glossary` probes. **`mlx_whisper` is faked at the import site and `conftest.fake_stt` is required
 by any test that routes audio** — without it a test that merely proves *dispatch* would load 1.5GB
 of weights, and the `whisper-stt` probe is pinned so a green suite never means "the owner happens to
-have the model on disk". Suite: 474 → 601, then **573** once the `#검토` tests were deleted with
-their subject.
+have the model on disk". Suite: 474 → 601, then **577** once the `#검토` tests were deleted with their
+subject (573) and the two self-review bugs were covered.
