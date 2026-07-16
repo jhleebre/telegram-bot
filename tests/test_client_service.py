@@ -72,7 +72,8 @@ async def test_audio_is_transcribed_and_advances(settings, tmp_path, fake_stt):
     await svc.start()
 
     assert len(list(settings.inbox_dir.iterdir())) == 1
-    assert bot.sent and "저장됨" in bot.sent[0][1]
+    # [0] is the "받았습니다" ack that precedes the slow work; the outcome is [1].
+    assert "저장됨" in bot.sent[-1][1]
     assert hwm.value == 7
 
 
@@ -416,3 +417,29 @@ async def test_nothing_is_promoted_while_a_review_is_still_open(settings, tmp_pa
     assert store.pending().message_id == 1
     assert [r.message_id for r in store.queued()] == [2]
     await svc.stop()
+
+
+# --------------------------------- increment 5: the 13 minutes of silence
+async def test_a_recording_is_acknowledged_before_the_slow_work_starts(settings, tmp_path, fake_stt):
+    """Measured on the first real recording: 13 minutes between sending a meeting and the review
+    block (320s of Whisper, then 423s of drafting), with the bot silent throughout. The owner
+    reasonably concluded it was broken."""
+    svc, client, bot, hwm = _make(settings, [voice_message(7)], tmp_path, hwm_start=0)
+
+    await svc.start()
+
+    assert bot.sent, "the owner must hear something before a multi-minute job"
+    assert "녹음을 받았습니다" in bot.sent[0][1]
+    # …and the real reply still follows it.
+    assert len(bot.sent) == 2
+    assert "저장됨" in bot.sent[1][1]
+
+
+async def test_only_audio_is_acknowledged(settings, tmp_path):
+    """Every other pipeline answers in seconds — an ack there is just noise."""
+    svc, client, bot, hwm = _make(settings, [text_message(7, "메모")], tmp_path, hwm_start=0)
+
+    await svc.start()
+
+    assert len(bot.sent) == 1
+    assert "녹음을 받았습니다" not in bot.sent[0][1]

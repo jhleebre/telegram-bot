@@ -18,7 +18,7 @@ from typing import Optional
 from telethon import TelegramClient, events
 
 from ..config import Settings
-from ..handlers.base import DeferMessage
+from ..handlers.base import DeferMessage, MessageKind
 from ..handlers.conversation import discard_incomplete, expire_stale, handle_reply, promote_next
 from .health import HealthChecker, HealthReport
 from .hwm import HighWaterMark
@@ -283,6 +283,29 @@ class ClientService:
             await self._halt(exc)
 
     # ------------------------------------------------------------------ dispatch
+    async def _ack_slow_job(self, incoming) -> None:
+        """Say "got it, this takes a while" for a job whose reply is minutes away.
+
+        **Measured, on the first real recording**: 13 minutes passed between the owner sending a
+        meeting and the review block arriving — 320s of Whisper, then 423s of drafting — and the bot
+        said nothing at all in between. The owner reasonably concluded it was broken. Every other
+        pipeline answers in seconds, so audio is the only kind where the silence is long enough to
+        read as a fault, and the owner is on a phone with no view of the app's PROCESSING status.
+
+        This lives here rather than in the handler because the client is what owns the notifier and
+        already decides everything else the owner hears (halts, skips, replies).
+
+        Safe to send before the engine call, unlike every *other* pre-LLM side effect: a
+        `DeferMessage` replay would re-send this, and a duplicate "got it" is noise, not damage —
+        it writes nothing and moves nothing.
+        """
+        if incoming.kind is not MessageKind.AUDIO or self._notifier is None:
+            return
+        await self._notifier.send(
+            "🎙 녹음을 받았습니다 — 전사하고 회의록 초안을 만드는 중입니다.\n"
+            "길이에 따라 5-20분쯤 걸리고, 준비되면 초안을 보내드립니다."
+        )
+
     async def _process(self, message, *, notify_status: bool) -> None:
         incoming = build_incoming_message(message)
         if incoming is None or incoming.kind is None:
@@ -296,6 +319,7 @@ class ClientService:
 
         if notify_status:
             self._status.set(BotStatus.PROCESSING, "메시지 처리 중…")
+        await self._ack_slow_job(incoming)
         try:
             result = await route(incoming, self._settings)
             if result.saved_path is not None:

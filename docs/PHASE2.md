@@ -1404,7 +1404,48 @@ already handled.
 - **A non-meeting review makes no glossary call**, and the branch is not dead weight — it is what
   open decision 6's producer (a text review started from the bot DM) will need.
 
-**Verification status.** Driven for real, end-to-end through `handle_audio` and `handle_reply`
+#### Owner verification — and the two things only a real meeting could show
+
+The owner ran a **real ~40-minute meeting** through it (`을지로2가.m4a`, 26MB → 878 segments, a
+38KB transcript) and it worked end-to-end: draft → correction → `확인` →
+`260716-회의-하반기_모두의_ai_전략_덱_검토.md`. The measured turns:
+
+| Turn | Time | Est. |
+|------|------|------|
+| Whisper (local, free) | 320s | — |
+| **Draft (turn 1)** | **423s, 3 turns** | ~$0.56 |
+| Revise | 82s | ~$0.42 |
+| Glossary | 1.7s | ~$0.05 |
+
+**Two problems fell out, and neither was findable without a real recording of a real length.**
+
+1. **The 600s timeout was a guess, and it was wrong.** The draft turn ate **70% of it** on an
+   ordinary meeting; a meeting twice as long would have blown it — and blowing it does not just
+   delay, it **loses the note**: `ClaudeTimeout` degrades to a transcript-only note, so the whole
+   expensive pipeline is spent and thrown away at the last step. The asymmetry is total (too long
+   costs patience the owner is not spending anyway, since the job is async and they are not
+   watching), so it is now **1800s** — ~4x measured.
+2. **13 minutes of total silence**, from sending the recording to the review block. Every other
+   pipeline replies in seconds, so this is audio's alone — and the owner, on a phone with no view of
+   the app's PROCESSING status, reasonably concluded the bot was broken and said so. The client now
+   **acknowledges a recording before the slow work starts**. It lives in `ClientService` rather than
+   the handler because the client owns the notifier and already decides everything else the owner
+   hears; it is the one safe pre-LLM "side effect", because a replayed duplicate of "got it" is
+   noise rather than damage.
+
+**Cost, now measured rather than extrapolated.** One reviewed meeting is **~$1.03 est** (0.56 draft
++ 0.42 revise + 0.05 glossary), and **every additional correction is another ~$0.4** — the revise
+turn re-reads the whole transcript. That is 10-30x a text memo, and the *Cost note* section's
+~$0.03-0.09 figure does not describe this pipeline at all. On a Pro plan whose 5-hour window is
+shared with the owner's own Claude Code sessions, a few meetings is a real fraction of the
+allowance.
+
+*(A note on the transcript: two of the 878 segments were Whisper repetition loops —
+`우리 우리 우리…` ×70 over silence. 0.2% of the transcript, and the model drafted through them
+without trouble, so it is recorded here rather than fixed. If it ever gets worse, the lever is
+`condition_on_previous_text=False`, which is what feeds those loops.)*
+
+**Verification status.** Also driven for real, end-to-end through `handle_audio` and `handle_reply`
 against the real `claude` binary and real `mlx-whisper`, on a synthesized Korean recording:
 
 - **The glossary substitution works, and it is the point of the whole feature.** Whisper heard 티맵
