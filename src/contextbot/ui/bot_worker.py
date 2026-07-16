@@ -67,7 +67,7 @@ class BotWorker(QThread):
                     HealthStatus.ERROR.value, "🔴 확인 실패", f"health check failed: {exc}"
                 )
                 return
-            self.health_ready.emit(report.overall.value, report.summary(), report.as_text())
+            self.health_ready.emit(report.overall.value, report.summary(), report.as_html())
 
         fut.add_done_callback(_done)
 

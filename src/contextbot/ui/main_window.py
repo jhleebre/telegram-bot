@@ -180,6 +180,11 @@ class MainWindow(QWidget):
         self._health_label.setObjectName("health")
         self._health_label.setFont(QFont("Menlo", 11))
         self._health_label.setWordWrap(True)
+        # Rich text: the probes arrive as coloured dots and their own leading (see
+        # HealthReport.as_html). Set explicitly rather than left to Qt's guess, which decides
+        # between plain and rich by sniffing the string for tags — a detail containing a `<` would
+        # otherwise silently change how the whole panel is laid out.
+        self._health_label.setTextFormat(Qt.RichText)
         policy = self._health_label.sizePolicy()
         policy.setVerticalPolicy(QSizePolicy.MinimumExpanding)
         policy.setHeightForWidth(True)

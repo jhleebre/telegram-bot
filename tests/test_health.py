@@ -64,12 +64,12 @@ async def test_disconnected_reported_but_not_fatal(settings):
     assert report.probe("connection").ok is False
 
 
-async def test_report_as_text(settings):
+async def test_report_as_html(settings):
     client = FakeClient(authorized=True)
     await client.connect()
-    text = (await HealthChecker(client, FakeBot(), settings).check()).as_text()
+    html = (await HealthChecker(client, FakeBot(), settings).check()).as_html()
     for name in ("telethon-auth", "bot-token", "inbox", "connection"):
-        assert name in text
+        assert name in html
 
 
 # ------------------------------------------------- claude-engine probe
@@ -240,3 +240,62 @@ async def test_a_present_glossary_is_reported(settings):
     assert probe.ok
     assert settings.glossary_path.name in probe.detail
     assert str(settings.glossary_path.parent) in probe.detail
+
+
+# ------------------------------------------- the panel speaks the bar's language
+def test_the_panel_uses_the_same_coloured_dot_as_the_bar(settings):
+    """The ✅/❌/🟡 emoji were a second visual vocabulary a few pixels from the bar's light: louder,
+    a different shape, and a different palette, all saying what the light says quietly."""
+    from contextbot.core.health import HEALTH_COLORS, HealthReport, HealthStatus, ProbeResult
+
+    html = HealthReport(
+        overall=HealthStatus.DEGRADED,
+        probes=[ProbeResult("inbox", True, "/x"), ProbeResult("whisper-stt", False, "no model")],
+    ).as_html()
+
+    for emoji in ("✅", "❌", "🟡", "🟢", "🔴"):
+        assert emoji not in html, f"{emoji} is the old vocabulary"
+    assert HEALTH_COLORS[HealthStatus.DEGRADED] in html   # the header carries the severity…
+    assert HEALTH_COLORS[HealthStatus.HEALTHY] in html    # …and each probe its own answer
+    assert HEALTH_COLORS[HealthStatus.ERROR] in html
+
+
+def test_the_panel_gives_its_lines_room_to_read(settings):
+    """Seven probes are a list to be scanned, not a paragraph. At the font's default leading the
+    marks in the left column nearly touched."""
+    from contextbot.core.health import HealthReport, HealthStatus, ProbeResult
+
+    html = HealthReport(overall=HealthStatus.HEALTHY, probes=[ProbeResult("inbox", True)]).as_html()
+
+    assert "line-height:150%" in html
+    assert "padding-bottom:5px" in html
+
+
+def test_a_wrapped_detail_hangs_under_the_text_not_under_the_dot(settings):
+    """Laid out as one flowing paragraph, a detail long enough to wrap put its continuation back
+    under the dot — a line with no mark, in the column reserved for marks, which reads as a probe
+    that lost its answer. Two table columns give the hanging indent for free; Qt's rich text ignores
+    the negative `text-indent` that would be the usual way to ask."""
+    from contextbot.core.health import HealthReport, HealthStatus, ProbeResult
+
+    html = HealthReport(
+        overall=HealthStatus.HEALTHY,
+        probes=[ProbeResult("whisper-stt", True, "a detail long enough to wrap " * 5)],
+    ).as_html()
+
+    assert html.startswith("<table")
+    assert html.count("<td") == 2 * 2, "one dot cell and one text cell per row (header + probe)"
+
+
+def test_a_detail_containing_markup_cannot_break_the_panel(settings):
+    """The panel is rich text now, and a probe's detail is a path or an error message — neither of
+    which promises to be free of `<`. Unescaped, one would eat the rest of the report."""
+    from contextbot.core.health import HealthReport, HealthStatus, ProbeResult
+
+    html = HealthReport(
+        overall=HealthStatus.ERROR,
+        probes=[ProbeResult("inbox", False, "not writable: <Errno 13> & denied")],
+    ).as_html()
+
+    assert "&lt;Errno 13&gt;" in html
+    assert "&amp; denied" in html

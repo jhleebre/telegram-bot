@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import tempfile
 from dataclasses import dataclass, field
+from html import escape
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -35,6 +36,36 @@ HEALTH_COLORS = {
 }
 # Before the first check has run there is nothing to report — not even "fine".
 HEALTH_UNKNOWN_COLOR = "#C9CEDB"
+
+# The panel's leading was the font's default, which for a monospaced face at this size is tight
+# enough that the marks in the left column nearly touch. Seven probes are a list to be scanned, not
+# a paragraph, and a list needs air between its items to read as one.
+_LINE_HEIGHT = 150
+_ROW_GAP_PX = 5
+
+# Small: this is punctuation, not an illustration. `●` at the body size would outweigh the text it
+# is labelling — which is exactly what the emoji did.
+_DOT_SIZE_PX = 9
+_DOT_GUTTER_PX = 7
+
+
+def _row(color: str, text: str, *, bold: bool = False) -> str:
+    """One probe: a coloured dot in its own column, then the text.
+
+    **A table, and the two columns are the whole reason.** Laid out as one flowing paragraph, a
+    detail long enough to wrap put its continuation back under the dot — a line with no mark, in the
+    column reserved for marks, which reads as a probe that lost its answer. A cell wraps inside
+    itself, so the text hangs under the text. (Measured against the alternatives: Qt's rich text
+    ignores a negative `text-indent`, which is the usual way to ask for this.)
+    """
+    body = f"<b>{text}</b>" if bold else text
+    return (
+        f'<tr>'
+        f'<td style="padding-right:{_DOT_GUTTER_PX}px; padding-bottom:{_ROW_GAP_PX}px;">'
+        f'<span style="color:{color}; font-size:{_DOT_SIZE_PX}px;">&#9679;</span></td>'
+        f'<td style="padding-bottom:{_ROW_GAP_PX}px; line-height:{_LINE_HEIGHT}%;">{body}</td>'
+        f'</tr>'
+    )
 
 
 @dataclass
@@ -71,14 +102,30 @@ class HealthReport:
         failing = [p.name for p in self.probes if not p.ok]
         return f"{icon} {', '.join(failing)}" if failing else f"{icon} 정상"
 
-    def as_text(self) -> str:
-        icon = _ICONS[self.overall]
-        lines = [f"{icon} Health: {self.overall.value}"]
-        for p in self.probes:
-            mark = "✅" if p.ok else "❌"
-            detail = f" — {p.detail}" if p.detail else ""
-            lines.append(f"{mark} {p.name}{detail}")
-        return "\n".join(lines)
+    def as_html(self) -> str:
+        """The report as the panel draws it: one coloured dot per probe, and room to read.
+
+        Rich text rather than a plain string, for the two things that were wrong with it. The
+        ✅/❌/🟡 emoji were a **second visual vocabulary** sitting a few pixels from the bar's light —
+        louder, a different shape, and a different palette, all saying what the light says quietly.
+        And emoji at this size pack so tight that the marks read as one smudged column rather than
+        as seven answers.
+
+        A probe is green or red — the same binary the ✅/❌ were — while the header dot carries the
+        report's *severity*, because that is the one line that has it: a failing `whisper-stt` is a
+        red probe inside an amber report, and both facts are true.
+        """
+        rows = [
+            _row(HEALTH_COLORS[self.overall], f"Health: {self.overall.value}", bold=True),
+            *(
+                _row(
+                    HEALTH_COLORS[HealthStatus.HEALTHY if p.ok else HealthStatus.ERROR],
+                    escape(p.name) + (f" — {escape(p.detail)}" if p.detail else ""),
+                )
+                for p in self.probes
+            ),
+        ]
+        return f'<table cellspacing="0" cellpadding="0">{"".join(rows)}</table>'
 
 
 def _inbox_writable(inbox_dir: Path) -> ProbeResult:

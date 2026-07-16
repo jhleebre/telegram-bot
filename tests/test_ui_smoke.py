@@ -147,7 +147,7 @@ def test_the_health_light_is_colour_only_with_no_caption(qtbot):
     qtbot.addWidget(window)
     report = _report(degraded=True)
 
-    worker.health_ready.emit(report.overall.value, report.summary(), report.as_text())
+    worker.health_ready.emit(report.overall.value, report.summary(), report.as_html())
 
     assert HEALTH_COLORS[HealthStatus.DEGRADED] in window._health_light.styleSheet()
     assert window._health_light.toolTip() == report.summary()
@@ -176,7 +176,7 @@ def test_the_health_panel_shows_every_probe_it_is_given(qtbot):
     qtbot.addWidget(window)
     window.show()
     report = _report(degraded=True)
-    worker.health_ready.emit(report.overall.value, report.summary(), report.as_text())
+    worker.health_ready.emit(report.overall.value, report.summary(), report.as_html())
     window._on_expand()
     window.resize(window.minimumSizeHint().width(), 300)
     qtbot.wait(50)
