@@ -49,7 +49,12 @@ logger = logging.getLogger("contextbot.handlers.conversation")
 REVIEW_PREFIX = "#검토"
 
 QUESTIONS_HEADING = "## 확인 요청"
+_TITLE_PREFIX = "제목:"
 _TAGS_PREFIX = "태그:"
+# How far into a turn's output to look for the 제목: line before giving up (see strip_preamble).
+# A preamble is an opening remark — a few lines at most. Bounding it is what stops a `제목:` deep
+# inside a real note's body from being mistaken for the title and discarding everything above it.
+_MAX_PREAMBLE_LINES = 8
 _SENTINEL = "DRAFT_FAILED"
 _MIN_OUTPUT_CHARS = 20
 _REVIEW_TIMEOUT_SEC = 120.0
@@ -123,11 +128,11 @@ def parse_draft(text: str) -> tuple[str | None, str, str]:
     heading just means there is nothing to ask. A malformed reply must never cost the owner a draft
     the model actually produced.
     """
-    stripped = text.strip()
+    stripped = strip_preamble(text).strip()
     title: str | None = None
     first, _, rest = stripped.partition("\n")
-    if first.strip().startswith("제목:"):
-        title = clean_title(first.strip()[len("제목:") :])
+    if first.strip().startswith(_TITLE_PREFIX):
+        title = clean_title(first.strip()[len(_TITLE_PREFIX) :])
         stripped = rest.strip()
 
     body, sep, questions = stripped.partition(QUESTIONS_HEADING)
@@ -176,6 +181,50 @@ def review_block(review: PendingReview) -> str:
 
 
 # ------------------------------------------------------------------- writing notes
+def strip_preamble(text: str) -> str:
+    """Drop anything a turn wrote *before* its `제목:` line. Returns the text unchanged if there
+    is nothing to drop.
+
+    **Measured, not defensive.** Both the draft and revise prompts say "output Markdown and nothing
+    else — no preamble", and it mostly works: the first real meeting-note run obeyed. The second
+    opened with `글로시리 확인이 완료됐습니다. …` and a `---`, which cost everything downstream at
+    once — `parse_draft` looks for `제목:` on the **first line**, so the title fell back to the
+    filename ("meeting"), the tags came out empty, and the preamble *and the raw `제목:`/`태그:`
+    lines* were all saved as the note's body. Nothing raised.
+
+    So the instruction stays (it is right, and it usually works) and the parsing stops depending on
+    it — the same shape as increment 2's answer to a flaky PDF conversion: harden the prompt *and*
+    make the failure structurally impossible to save.
+
+    Bounded on purpose. Only the first few lines are searched, so a `제목:` occurring naturally deep
+    in a note's body can never eat the note above it: a preamble is an opening remark, not content.
+    """
+    lines = text.strip().splitlines()
+    if not lines or lines[0].strip().startswith(_TITLE_PREFIX):
+        return text
+    for index, line in enumerate(lines[:_MAX_PREAMBLE_LINES]):
+        if line.strip().startswith(_TITLE_PREFIX):
+            logger.warning("dropping a %d-line preamble before the 제목: line", index)
+            return "\n".join(lines[index:])
+    return text
+
+
+def strip_trailing_rule(body: str) -> str:
+    """Drop a horizontal rule left at the end of a draft body.
+
+    The prompts ask for the questions heading straight after the note; a model that puts a `---`
+    separator before it leaves that rule behind in the body, because `parse_draft` splits on the
+    heading and everything above it is the note. Observed on the first real meeting-note run.
+    Harmless but visible: the saved note ends in a dangling `<hr>`.
+    """
+    stripped = body.rstrip()
+    while True:
+        head, sep, last = stripped.rpartition("\n")
+        if not sep or set(last.strip()) not in ({"-"}, {"*"}, {"_"}) or len(last.strip()) < 3:
+            return stripped
+        stripped = head.rstrip()
+
+
 def split_tags(body: str) -> tuple[list[str], str]:
     """Pull a `태그:` line off the front of a draft body; return (tags, body).
 
@@ -601,6 +650,7 @@ async def _revise(
     tags, body = split_tags(body)
     if tags:
         review.tags = tags
+    body = strip_trailing_rule(body)
     review.questions = questions
     review.write_draft(body)
     review.failures = 0

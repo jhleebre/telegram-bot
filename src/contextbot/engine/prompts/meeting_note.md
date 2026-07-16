@@ -21,7 +21,12 @@ against the recording, so keep track of where things were said; step 3 needs the
 # Step 1 — write the note
 
 Output Markdown and nothing else: no preamble, no closing remarks, and no code fence around the
-whole reply. Use exactly this structure, starting with the two metadata lines:
+whole reply. **The very first characters of your reply are `제목:`** — nothing precedes them. Not a
+note on what you read, not a summary of the glossary work, not a `---`, not "알겠습니다". You have
+no audience for progress reports here: your reply is parsed, not read, and anything above the
+`제목:` line is saved into the note as if it were part of the meeting.
+
+Use exactly this structure, starting with the two metadata lines:
 
 제목: 회의를 한 눈에 알아볼 수 있는 짧은 제목
 태그: 태그1, 태그2, 태그3
@@ -100,7 +105,9 @@ not a range (a file path like `~/Projects`, a URL, or anything inside a code blo
 
 # Step 2 — flag what you could not resolve
 
-Last, exactly this heading with your questions under it:
+Last, exactly this heading with your questions under it. **Nothing between the note and the
+heading** — no horizontal rule, no `---`, no separator of any kind. The note ends where the heading
+begins, and anything you put in that gap is kept as part of the note.
 
 {questions_heading}
 

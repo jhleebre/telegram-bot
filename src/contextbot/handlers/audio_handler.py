@@ -52,6 +52,7 @@ from .conversation import (
     activate,
     parse_draft,
     split_tags,
+    strip_trailing_rule,
 )
 from .downloads import download_attachment
 from .text_handler import clean_title
@@ -273,7 +274,7 @@ async def _draft(
     review.title = title or _fallback_title(message)
     review.tags = tags
     review.questions = questions
-    review.write_draft(body)
+    review.write_draft(strip_trailing_rule(body))
 
     # The audio moves into the review's tree, where it lives exactly as long as the review does and
     # is deleted by its ending — on accept, cancel, delivery, or expiry alike. Nothing has to

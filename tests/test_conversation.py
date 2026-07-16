@@ -34,6 +34,7 @@ from contextbot.handlers.conversation import (
     promote_next,
     review_block,
     split_tags,
+    strip_trailing_rule,
 )
 
 DATE = datetime(2026, 7, 15, 14, 30, tzinfo=timezone.utc)
@@ -1013,3 +1014,98 @@ async def test_a_duplicate_term_is_not_appended_twice(live, store):
 
     assert "용어집에 추가" not in reply
     assert live.glossary_path.read_text(encoding="utf-8").count("팀웹") == 1
+
+
+def test_strip_trailing_rule_drops_a_separator_left_before_the_questions():
+    """Found on the first real meeting-note run: the model put `---` before the questions heading,
+    `parse_draft` split on the heading, and the rule stayed in the note body as a dangling <hr>."""
+    assert strip_trailing_rule("## Notes\n\n내용입니다.\n\n---") == "## Notes\n\n내용입니다."
+    assert strip_trailing_rule("본문\n\n***\n") == "본문"
+    assert strip_trailing_rule("본문\n\n___") == "본문"
+
+
+def test_strip_trailing_rule_keeps_real_content():
+    assert strip_trailing_rule("## Notes\n\n내용입니다.") == "## Notes\n\n내용입니다."
+    # A list item is not a rule, and neither is a table.
+    assert strip_trailing_rule("- 항목 하나\n- 항목 둘") == "- 항목 하나\n- 항목 둘"
+    assert strip_trailing_rule("| a | b |\n|---|---|\n| 1 | 2 |").endswith("| 1 | 2 |")
+
+
+def test_strip_trailing_rule_only_touches_the_end():
+    """A rule inside the body is the author's — including a setext `---` underline, which this
+    would otherwise demote from a heading to a paragraph. Only a *trailing* one is the model's
+    leftover separator."""
+    assert strip_trailing_rule("제목\n---\n\n본문") == "제목\n---\n\n본문"
+    assert strip_trailing_rule("## A\n\n하나\n\n---\n\n## B\n\n둘") == "## A\n\n하나\n\n---\n\n## B\n\n둘"
+
+
+# --------------------------------- increment 5: the preamble (found on a real run)
+PREAMBLE_DRAFT = f"""글로시리 확인이 완료됐습니다. 전사에서 「팀웹」→ T-map 치환을 적용하고 노트를 작성합니다.
+
+---
+
+제목: T-map 안건 배분 및 예산 감축 결정
+태그: T-map, 예산-감축
+
+## Overview
+
+내용입니다.
+
+{QUESTIONS_HEADING}
+
+- (없음)
+"""
+
+
+def test_parse_draft_survives_a_preamble_before_the_title():
+    """Measured, not hypothetical.
+
+    Both prompts say "no preamble" and it mostly works — the first real meeting-note run obeyed.
+    The second opened with a sentence about its own glossary work, and that one slip cost
+    everything at once: the title fell back to the filename, the tags came out empty, and the
+    preamble *plus the raw 제목:/태그: lines* were saved as the note's body. Nothing raised.
+    """
+    title, body, questions = parse_draft(PREAMBLE_DRAFT)
+
+    assert title == "T-map 안건 배분 및 예산 감축 결정"
+    assert body.startswith("태그: T-map")  # the tags line is split_tags' job, not this one
+    assert "글로시리 확인이 완료됐습니다" not in body
+    assert "(없음)" in questions
+
+
+def test_a_preamble_does_not_cost_the_tags_either(live, store):
+    tags, body = split_tags(parse_draft(PREAMBLE_DRAFT)[1])
+
+    assert tags == ["T-map", "예산-감축"]
+    assert body == "## Overview\n\n내용입니다."
+
+
+def test_parse_draft_leaves_a_body_with_no_title_line_alone():
+    """No 제목: anywhere means there is nothing to strip — never discard a real body hunting one."""
+    title, body, _ = parse_draft("## Overview\n\n내용입니다.")
+
+    assert title is None
+    assert body == "## Overview\n\n내용입니다."
+
+
+def test_a_title_line_deep_in_the_body_is_not_treated_as_a_preamble_marker():
+    """The bound matters: a preamble is an opening remark, so a `제목:` further down is content and
+    must never eat the note above it."""
+    body_lines = "\n".join(f"## 섹션 {i}\n\n내용" for i in range(6))
+    text = f"{body_lines}\n\n제목: 이건 본문 안의 글자입니다"
+
+    _, body, _ = parse_draft(text)
+
+    assert body.startswith("## 섹션 0")
+    assert "제목: 이건 본문 안의 글자입니다" in body
+
+
+async def test_a_preamble_on_a_revision_does_not_corrupt_the_note(live, store):
+    """The revise turn shares the parsing, so it shares the protection."""
+    await _open_review(live, store)
+    revised = f"알겠습니다. 수정했습니다.\n\n제목: 고친 제목\n\n## 결정사항\n\n고친 내용.\n\n{QUESTIONS_HEADING}\n\n- (없음)\n"
+
+    await handle_reply("고쳐주세요", live, store=store, engine=FakeEngine(ClaudeResult(text=revised)))
+
+    assert store.pending().title == "고친 제목"
+    assert store.pending().draft == "## 결정사항\n\n고친 내용."
