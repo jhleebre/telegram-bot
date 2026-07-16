@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from contextbot.files.originals import move_to_downloads
+from contextbot.files.originals import embed_link, move_into_assets, move_to_downloads
 
 
 def _file(directory: Path, name: str, content: str = "x") -> Path:
@@ -44,3 +44,41 @@ def test_expands_user_relative_dirs(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     moved = move_to_downloads(_file(tmp_path / "tmp", "a.pdf"), downloads_dir="~/Downloads")
     assert moved == tmp_path / "Downloads" / "a.pdf"
+
+
+# ------------------------------------------------------- keep-and-embed (images)
+def test_move_into_assets(tmp_path: Path):
+    src = _file(tmp_path / "tmp", "shot.png", "png bytes")
+    assets = tmp_path / "vault" / ".assets"
+
+    stored = move_into_assets(src, assets_dir=assets)
+
+    assert stored == assets / "shot.png"
+    assert stored.read_text(encoding="utf-8") == "png bytes"
+    assert not src.exists()
+
+
+def test_move_into_assets_renames_to_match_the_note(tmp_path: Path):
+    src = _file(tmp_path / "tmp", "IMG_4821.png")
+    stored = move_into_assets(
+        src, assets_dir=tmp_path / ".assets", filename="260715-1430-예산_검토.png"
+    )
+    assert stored.name == "260715-1430-예산_검토.png"
+
+
+def test_move_into_assets_never_overwrites(tmp_path: Path):
+    assets = tmp_path / ".assets"
+    _file(assets, "shot.png", "first")
+
+    stored = move_into_assets(_file(tmp_path / "tmp", "shot.png", "second"), assets_dir=assets)
+
+    assert stored.name == "shot-2.png"
+    assert (assets / "shot.png").read_text(encoding="utf-8") == "first"
+
+
+def test_embed_link_is_vault_root_relative(tmp_path: Path):
+    """MarkNotes resolves `.assets/x` against the vault root, not the note's folder — which is
+    what keeps the embed working after the note is triaged out of 0_inbox."""
+    assert embed_link(Path("/vault/.assets/260715-1430-shot.png")) == (
+        "![260715-1430-shot](.assets/260715-1430-shot.png)"
+    )

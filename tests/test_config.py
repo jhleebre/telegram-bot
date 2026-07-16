@@ -125,6 +125,8 @@ def test_claude_defaults(tmp_path):
     assert settings.claude_model == "sonnet"
     # PDF conversion defaults to a stronger model than text enrichment (measured flaky on sonnet).
     assert settings.claude_pdf_model == "opus"
+    # Images stay on the cheap default: measured 5/5 on sonnet, so opus buys nothing here.
+    assert settings.claude_image_model == "sonnet"
     assert settings.claude_timeout_sec == 120.0
 
 
@@ -134,13 +136,40 @@ def test_claude_overrides(tmp_path):
         CLAUDE_BIN="/opt/homebrew/bin/claude",
         CLAUDE_MODEL="opus",
         CLAUDE_PDF_MODEL="sonnet",
+        CLAUDE_IMAGE_MODEL="opus",
         CLAUDE_TIMEOUT_SEC="300",
     )
     settings = Settings.load(env, use_dotenv=False)
     assert settings.claude_bin == "/opt/homebrew/bin/claude"
     assert settings.claude_model == "opus"
     assert settings.claude_pdf_model == "sonnet"
+    assert settings.claude_image_model == "opus"
     assert settings.claude_timeout_sec == 300.0
+
+
+# ------------------------------------------------- the vault's .assets dir
+def test_assets_dir_defaults_to_the_vault_root(tmp_path):
+    """`.assets` belongs to the vault, and the inbox's parent is the only handle on its root —
+    the same relationship `load` already relies on when it insists that parent exists."""
+    settings = Settings.load(_base_env(tmp_path), use_dotenv=False)
+    assert settings.assets_dir == tmp_path / ".assets"
+
+
+def test_assets_dir_override(tmp_path):
+    env = _base_env(tmp_path) | {"ASSETS_DIR": str(tmp_path / "elsewhere" / ".assets")}
+    assert Settings.load(env, use_dotenv=False).assets_dir == tmp_path / "elsewhere" / ".assets"
+
+
+def test_assets_dir_is_derived_for_hand_built_settings_too(tmp_path):
+    """A directly-constructed Settings (every test fixture) must never point at the real vault."""
+    settings = Settings(
+        api_id=1,
+        api_hash="x",
+        session_path=tmp_path / "s",
+        telegram_bot_token="t",
+        inbox_dir=tmp_path / "vault" / "0_inbox",
+    )
+    assert settings.assets_dir == tmp_path / "vault" / ".assets"
 
 
 @pytest.mark.parametrize(

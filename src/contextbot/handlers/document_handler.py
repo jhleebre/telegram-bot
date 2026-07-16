@@ -32,6 +32,7 @@ from ..files.text_files import DecodeError, decode_text, render_csv_table
 from ..notes.markdown_writer import write_note, write_text
 from ..notes.naming import build_filename
 from .base import DeferMessage, HandlerResult, IncomingMessage, MessageKind
+from .downloads import download_attachment as _download
 from .text_handler import clean_title, enrich_or_fallback
 
 logger = logging.getLogger("contextbot.handlers.document")
@@ -77,35 +78,6 @@ def _ext(file_name: str | None) -> str:
     if not file_name or "." not in file_name:
         return ""
     return "." + file_name.rsplit(".", 1)[1].lower()
-
-
-def _safe_name(file_name: str | None, message_id: int) -> str:
-    """A filesystem-safe basename for a downloaded attachment.
-
-    The name comes from Telegram, and a *forwarded* file's name is not the owner's own writing, so
-    it is untrusted input: keep the basename only, so it cannot escape the temp dir.
-    """
-    name = Path(file_name or "").name.strip()
-    if name in {"", ".", ".."}:
-        return f"telegram-{message_id}"
-    return name
-
-
-async def _download(message: IncomingMessage, dest_dir: Path) -> Path:
-    """Download the message's attachment into ``dest_dir`` and return its path.
-
-    Raises on failure: a file we cannot download is a fault, so the client skips the message and
-    tells the owner, rather than halting the bot on every Start.
-    """
-    download = getattr(message.raw, "download_media", None)
-    if download is None:
-        raise RuntimeError("message has no downloadable attachment")
-
-    target = dest_dir / _safe_name(message.file_name, message.message_id)
-    path = await download(file=str(target))
-    if path is None:
-        raise RuntimeError("Telegram returned no file for the attachment")
-    return Path(path)
 
 
 def _too_big_reply(name: str, size: int) -> str:

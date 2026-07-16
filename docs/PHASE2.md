@@ -1,4 +1,4 @@
-# Phase 2 — Development Plan (increments 1–2 of 5 shipped)
+# Phase 2 — Development Plan (increments 1–3 of 5 shipped)
 
 Phase 2 adds the LLM/VLM-powered pipelines on top of the Phase 1 skeleton. The engine is
 **Claude Code in headless mode** (`claude -p`), and multi-turn human-in-the-loop review is built
@@ -8,8 +8,9 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > **Picking this up in a fresh session?** Read, in order: this header → *Delivery approach* →
 > *Increment 1 (as built)* (the engine's contract and the three real-world bugs it hit) →
 > *Increment 2 (as built)* (the file pipelines and the isolation the PDF route depends on) →
-> *Usage-limit policy* (binding on every later increment) → *Next up: increment 3*.
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **270 passing**, no network or model runs.
+> *Increment 3 (as built)* (images, and the format finding that route turns on) →
+> *Usage-limit policy* (binding on every later increment) → *Next up: increment 4*.
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **335 passing**, no network or model runs.
 
 **Ingestion recap (from the Phase 1 hybrid):** input files arrive via **Saved Messages** (Telethon)
 and are downloaded to a temp dir with `message.download_media(...)`. The **review conversation runs
@@ -37,10 +38,11 @@ Recommended order (each is a self-contained milestone — ship and verify before
 - [x] **2. Documents → Markdown** (`document_handler` + `files/`) — five routes: `.md` passthrough,
       `.txt`/`.csv` notes, `.pdf` conversion, unsupported → PDF-export reply. No review loop, no
       converter, no new dependency. **Shipped and owner-verified** — see "Increment 2 (as built)".
-- [ ] **3. Image → described note** (`image_handler`, VLM via `claude -p`) — still no review loop.
-      **Next up** — the handoff is "Next up: increment 3" below.
+- [x] **3. Image → described note** (`image_handler`, VLM via `claude -p`) — still no review loop.
+      **Shipped** — see "Increment 3 (as built)" below.
 - [ ] **4. Human-in-the-loop plumbing** (`core/session_store.py`, `handlers/conversation.py`, bot-DM
       polling) — build and test the review state machine on a simple case first.
+      **Next up** — the handoff is "Next up: increment 4" below.
 - [ ] **5. Audio → meeting note** (`audio_handler`, `mlx-whisper`, glossary, review) — the most
       complex; depends on 1 and 4.
 
@@ -239,7 +241,7 @@ document's own title, `##`/`###` structure, and rendered tables, faithfully.
 | Input | Output | Original file |
 |-------|--------|---------------|
 | Audio (m4a/wav/mp3/voice) | Meeting note (glossary-corrected, reviewed) → `0_inbox` | deleted after success |
-| Image (screen capture) | Description + OCR note, original embedded → `0_inbox` | kept (embedded/`.assets`) |
+| **Image** (screen capture/photo) | ✅ **shipped** — description + OCR note, image embedded → `0_inbox` | **kept in the vault's `.assets/`** (embedded; heic/bmp → PNG first) |
 | **PDF** | ✅ **shipped** — Markdown (Claude reads the PDF natively) → `0_inbox` | **moved to `~/Downloads/`** |
 | docx / pptx / xlsx / … | ✅ **shipped** — **out of scope by decision**: reply asking for a PDF export | — |
 | txt / csv | ✅ **shipped** — Markdown note (csv → table, rendered deterministically) → `0_inbox` | **moved to `~/Downloads/`** |
@@ -253,22 +255,25 @@ src/contextbot/
 ├── engine/                 # ✅ built in increment 1
 │   ├── claude_cli.py       # wrapper over `claude -p` (async subprocess, JSON parse, resolution)
 │   ├── parsing.py          # recover a JSON object from a model's free-text reply
-│   └── prompts/            # templates: text_enrich ✅ / pdf_to_markdown ✅ / meeting / image
+│   └── prompts/            # templates: text_enrich ✅ / pdf_to_markdown ✅ / image_describe ✅ / meeting
 ├── core/
 │   └── session_store.py    # per-chat conversation state + Claude session_id persistence
 ├── handlers/
 │   ├── audio_handler.py    # (fill in) audio → meeting note
-│   ├── image_handler.py    # (fill in) image → described note
+│   ├── image_handler.py    # ✅ built in increment 3 — image → described note
 │   ├── document_handler.py # ✅ built in increment 2 — md / txt / csv / pdf / unsupported
+│   ├── downloads.py        # ✅ built in increment 3 — shared attachment download (audio is next)
 │   └── conversation.py     # routes a plain-text reply into an active pending session
-└── files/                  # ✅ built in increment 2
-    ├── originals.py        # original-file policy (Downloads / delete / embed)
+└── files/                  # ✅ built in increments 2–3
+    ├── originals.py        # original-file policy (Downloads / delete / keep-and-embed)
+    ├── images.py           # ✅ increment 3 — heic/bmp → PNG, so the model actually *sees* it
     └── text_files.py       # encoding detection + deterministic CSV → Markdown table
 ```
 
 Additional runtime deps: `mlx-whisper` (STT, Apple Silicon) — **and nothing else**. Documents need
 no converter library and no LibreOffice: the scope is PDF-only and Claude Code reads PDFs natively
-(see decision 3). `ffmpeg` is already present. `claude` CLI is already installed (v2.1.187 verified).
+(see decision 3). Images need no imaging library: `sips` ships with macOS (increment 3). `ffmpeg` is
+already present. `claude` CLI is already installed (v2.1.187 verified).
 
 ## Engine: `claude -p` wrapper (`engine/claude_cli.py`)
 
@@ -368,10 +373,20 @@ Three consequences, all now handled:
 For text notes this is fully safe: the note is saved via the Phase 1 path after a ~2s failure, and
 the bot DM says why. **Increments 2–5 need more thought** — see "Degradation per pipeline" below.
 
-### Usage-limit policy — defer and replay (decided; implemented)
+### Usage-limit policy — defer and replay (decided; implemented; **owner-verified for real**)
 
 **When the usage limit is exhausted, the bot stops and leaves the message unprocessed. The owner
 restarts after the limit resets, and catch-up replays it from where it left off.**
+
+> **Confirmed against a real exhausted limit (owner, increment 3).** Everything below was designed
+> against an *injected* 429 (`ANTHROPIC_BASE_URL` pointed at a local endpoint). The owner has since
+> hit the **real 5-hour session limit** with `claude -p` genuinely unavailable, and **the policy
+> behaved exactly as specified**: the message was deferred rather than half-processed, the HWM was
+> left unadvanced, the bot halted with the reason, and the message was replayed intact after the
+> window reset. So the 429 injection was a faithful stand-in, and the *lossless deferral* claim is
+> no longer theoretical — it is the observed behaviour of the real limit, which is the one failure
+> mode guaranteed to happen again on a Pro plan whose allowance is shared with the owner's own
+> Claude Code sessions.
 
 This needs no queue: the HWM already advances only on success, Saved Messages is durable, and
 catch-up already replays from the HWM. **Deferring is lossless** — which is the same property that
@@ -411,7 +426,7 @@ failure, and text is the only one with a real no-LLM path:
 |----------|-------------------------------------------|
 | Text (1) | ✅ Phase 1 path; note keeps full fidelity, only metadata is weaker |
 | Document (2) | ✅ **decided when built, and it splits.** `.txt`/`.csv` degrade like text (the body is the file, so only frontmatter weakens). `.pdf` has **no fallback** — the LLM *is* the converter — so: no note, reply with the reason, original still filed to `~/Downloads` |
-| Image (3) | No fallback: a described note *is* the LLM output. Save the image + a stub note? |
+| Image (3) | ✅ **decided when built: save the image + a stub note that embeds it.** No fallback exists for the description — but unlike a PDF, the image *is* the capture and is worth keeping regardless, so the note is always written and always embeds it, with the reason in place of the description |
 | Audio (5) | **No fallback.** STT is local, so the transcript survives — but the meeting note does not. Saving the raw transcript beats losing the recording. |
 | Review (4) | A failure mid-review would strand a session in `AWAITING_REVIEW`. The state machine must handle "cannot resume right now" without dropping the draft. |
 
@@ -454,6 +469,12 @@ probe and the PDF robustness changes (retry recovery, give-up-after-N, short-stu
 `test_document_handler.py`, `test_claude_cli.py`, `test_health.py`, and `test_config.py`.
 Suite: 171 → 270.
 
+Increment 3 adds `test_image_handler.py` (the happy path, the staging isolation, the `제목:` line and
+its fallbacks, every degradation path landing on a stub note that still embeds the image, and
+deferral-leaves-no-side-effect), `test_images.py` (format policy + real `sips` conversions),
+`test_downloads.py` (the extracted helper, incl. untrusted-filename traversal), plus `.assets` cases
+in `test_originals.py` and `test_config.py`. Suite: 270 → **335**.
+
 ## Human-in-the-loop via session preservation
 
 `core/session_store.py` + `handlers/conversation.py` implement a per-review state machine:
@@ -492,74 +513,155 @@ IDLE ──job needs review──▶ AWAITING_REVIEW ──owner reply (bot DM)�
 
 ## B. Image → described note (VLM via `claude -p`)
 
-- Save the original image into the vault (`.assets/` or note-adjacent). Call `claude -p` with the
-  image path for a detailed description + OCR. Write a note **embedding the original image**
-  (relative link) plus the description/OCR to `0_inbox`. (No review loop unless the user wants
-  one.)
+- **Shipped in increment 3** (see *Increment 3 (as built)* for the measurements behind each choice).
+  The image is kept in the vault's **root `.assets/`** and embedded as `![…](.assets/<file>)`, above
+  a Claude-generated description + OCR, in `0_inbox`. No review loop.
+- **`heic`/`heif`/`bmp` are converted to PNG first** (`files/images.py`, via macOS `sips`) — `Read`
+  hands those back as raw *bytes* without erroring, and the model will describe the file header and
+  report success. This is not optional.
 
-### Next up: increment 3 — image → described note
+### Increment 3 (as built) — image → described note
 
-**Status: not started.** Increment 2 is shipped and owner-verified (all five routes + multi-file
-sequential processing confirmed in the real app). Increment 3 builds on it.
+Delivered: `handlers/image_handler.py`, `files/images.py` (new — format normalization),
+`handlers/downloads.py` (new — the shared download helper, extracted from `document_handler`),
+`engine/prompts/image_describe.md`, `files/originals.move_into_assets` + `embed_link`, and the
+`ASSETS_DIR` / `CLAUDE_IMAGE_MODEL` settings. Suite: 270 → **335**.
 
-Scope: `handlers/image_handler.py` (still a stub) + a new `image` prompt template. **Still no review
-loop** — that is increment 4. One-shot VLM call, like the PDF path.
+**All four open decisions were settled by measurement before building.** Each is recorded below
+with what was measured, because three of the four came out against the expected answer.
 
-**What it does (item B, unchanged):** a sent image (a Telegram *photo*, or an image sent as a file:
-png/jpg/jpeg/gif/webp/bmp/heic/heif) becomes a note in `0_inbox` that **embeds the original image**
-(relative Markdown link) above a Claude-generated **description + OCR**. Unlike every increment-2
-route, the original is **kept, not moved** — it lives in the vault so the embed resolves.
+#### The four decisions
 
-**Reuse directly (built and verified in increments 1–2 — do not re-invent):**
+**1. Non-limit failure → keep the image, write a stub note that embeds it.** (Confirmed as the
+handoff predicted.) The PDF route writes *no* note on failure, because a PDF without its conversion
+is nothing. An image without its description is still **the image**, and it is what the owner
+actually sent — so the note is always written, always opens with the embed, and carries
+`> ⚠️ 이미지 설명을 생성하지 못했습니다 — <reason>` in place of the description. The capture is never
+lost; only the searchable text is. This covers every non-limit path: engine error, the sentinel, an
+unconvertible file, an oversized file, and `CLAUDE_ENABLED=false`.
 
-- **`ClaudeCLI.run(prompt, *, system_prompt, add_dirs, cwd, timeout_sec, model)`** is how a file
-  reaches the model. An image is read from disk exactly as a PDF is: **stage it alone in a
-  `TemporaryDirectory` that is both `cwd` and the only `--add-dir`.** The fabrication-from-a-
-  neighbour risk is identical, so the isolation is mandatory, not optional.
-- **The per-call `model=` override exists.** Decide the image model (see open decisions). A single
-  image is far lighter than an 8-page deck, so `sonnet` may well be reliable — *measure before
-  defaulting to opus.* If a stronger model is wanted, add `CLAUDE_IMAGE_MODEL` alongside
-  `CLAUDE_PDF_MODEL` (same pattern in `config.py`).
-- **`files/originals.py`** is where the original-file policy lives. Add the *keep-and-embed* policy
-  there (e.g. `move_into_assets(src, assets_dir)`), next to `move_to_downloads`. Do **not** put file
-  policy in the handler.
-- **`handlers/document_handler._download` is the download helper** (Telethon `download_media` into a
-  temp dir, untrusted-filename-safe via `_safe_name`). Photos need downloading too. **Extract this
-  helper to a shared module** (e.g. `handlers/_common.py` or `files/`) rather than importing across
-  handlers or duplicating it — increment 5 (audio) will need it a third time.
-- **`enrich_or_fallback` / the sentinel+retry shape** are references, not necessarily reuse. An
-  image description has no deterministic fallback, so it is closer to the PDF path than the text
-  path. If the VLM proves flaky, the bounded-retry pattern from `_handle_pdf` is right there.
-- **Signature:** `async def handle_image(message, settings, *, engine: ClaudeCLI | None = None)`, to
-  match `handle_document` so tests inject a fake engine. The router already maps `MessageKind.IMAGE`
-  → `handle_image`; just fill the body.
+**2. The image lives in the vault-root `.assets/`, embedded as `![…](.assets/<file>)`.** This was
+settled by reading MarkNotes' source rather than choosing: `ASSETS_PATH = <vault root>/.assets`, and
+an embed is resolved with `path.join(ROOT_PATH, imagePath)` and matched by the literal pattern
+`![alt](.assets/<file>)`. So the prefix **looks** note-relative but is **vault-root-anchored** —
+which settles the question the handoff raised, and settles it well: the embed keeps working after
+the owner triages the note out of `0_inbox` into `2_areas/…`. Note-adjacent would have broken on
+the first move. `assets_dir` is derived from the vault root (the inbox's parent — a relationship
+`config.load` already relies on), with `ASSETS_DIR` to override.
 
-**Invariants that still bind (do not re-litigate — see the usage-limit policy and increment 2):**
+**3. Image model: `sonnet` — the cheap default, measured, not assumed.** The handoff said *measure
+before defaulting to opus*, and the measurement came back clean: **5 of 5 runs** on a real Korean
+screenshot (mixed Korean/English, a 4-column table, a bold total row) produced an accurate
+description and transcribed **every figure correctly**, in 2 turns for ~$0.025 est. The PDF route's
+flakiness never appeared — an 8-page deck and one screenshot are not the same job. `sonnet` it is,
+with `CLAUDE_IMAGE_MODEL` as the dial if a real photo ever proves harder. **No retry loop either**,
+for the same reason: there was nothing flaky to absorb.
 
-- **All side effects after the last LLM call.** A usage limit raises `DeferMessage` *before* the
-  image is embedded or the note written, so the replay starts clean.
-- **The bot writes the note; Claude returns text only.** Same as every other pipeline.
-- **Never treat `is_error: False` as proof.** Stage alone; if you add a "couldn't read the image"
-  signal, gate the note on it as the PDF route gates on `CONVERSION_FAILED`.
+**4. Formats — and this is the one that matters.** `Read` **does not render `.heic` or `.bmp`, and
+does not error on them.** Asked to read a `.heic`, it returns the file's **raw bytes**, and the
+model — seeing `ftypheic` in the header — answered *"a HEIC image, likely a photo taken on an Apple
+device"* with `is_error: False`. That is a confident, plausible, **entirely unseen** description
+that would have been saved and trusted. It is increment 2's `.docx` fabrication wearing a different
+hat: **the model describes what it can infer when it cannot see, and reports success either way.**
+Pressed harder ("transcribe every line"), it did admit `READ_FAILED` — but the note would never have
+pressed. Measured against the real CLI:
 
-**Open decisions to settle at the start of increment 3 (record the answers here, as increment 2
-did):**
+| Format | `Read` renders it? | MarkNotes embeds it? | Policy |
+|--------|--------------------|----------------------|--------|
+| `png` `jpg` `jpeg` `gif` `webp` | ✅ | ✅ | staged as-is — **never re-encoded** |
+| `heic` `heif` `bmp` | ❌ **silently returns bytes** | ❌ | **converted to PNG first** |
 
-1. **Non-limit failure with no fallback.** A described note *is* the LLM output, so there is no
-   degraded version. Increment 2 answered this for PDF with *write nothing, say why*. **Images
-   differ: the original is worth keeping regardless.** Likely answer: save the image into the vault
-   and write a **stub note that embeds it** with a "description unavailable" line, so the capture is
-   never lost — but confirm and record it.
-2. **Where the image lives.** `.assets/` (shared) vs note-adjacent. This sets the embed's relative
-   path. Whatever is chosen, the embed link and the file location must agree.
-3. **Image model** (see reuse note) — `sonnet` vs a stronger default; measure first.
-4. **Size / format caps.** Large photos and formats Claude's `Read` may not accept (heic/heif?).
-   Probe what `Read` supports before assuming; a `.heic` from an iPhone is the realistic input.
+The two readers exclude the same formats, which is a useful coincidence: MarkNotes'
+`ALLOWED_IMAGE_EXTENSIONS` is `.jpg .jpeg .png .gif .svg .webp`. So the converted PNG is what the
+model reads **and** what the note embeds — keeping the `.heic` would have left a note whose embed
+the vault could not render either. `files/images.py` does this with **`sips`** (ships with macOS; no
+new dependency, and the app is macOS-only already). The `.heic` is the realistic input: it is what
+an iPhone sends when the owner picks "send as file". `original_file` in the frontmatter still
+records the true origin (`IMG_4821.heic`).
 
-**Verification bar (same as increment 2):** unit tests with a mocked engine + faked download (no
-model runs), the whole suite green, then a real-app run — send a real screenshot/photo and confirm
-the note embeds it and the description is accurate. **Stop for owner confirmation before increment
-4.**
+**Size cap: 10MB** — MarkNotes' own `MAX_IMAGE_SIZE`. Far more generous than the document routes'
+2MB because the image is stored as a file and embedded *by reference*, so the note does not grow
+with it; past 10MB the vault refuses to embed it when exporting to PDF anyway. Oversized → kept and
+embedded, but not described.
+
+#### As built
+
+| Step | What happens |
+|------|--------------|
+| download | `handlers/downloads.download_attachment` into a temp dir |
+| normalize | `files/images.normalize` — PNG-convert only if unrenderable |
+| describe | one-shot `claude -p` on `claude_image_model`, staged alone (`cwd` + sole `--add-dir`) |
+| write | image → `.assets/`, note → `0_inbox`, **both after the LLM call** |
+
+Points worth knowing before touching this:
+
+- **The isolation is identical to the PDF route and equally mandatory** — staged alone in a
+  `TemporaryDirectory` that is both `cwd` and the only `--add-dir`.
+  `test_image_is_staged_alone_in_an_isolated_dir` asserts the directory listing *as the model would
+  see it*, at call time.
+- **The sentinel is `DESCRIPTION_FAILED`**, checked on the **first line** (a screenshot of an
+  error-code table may legitimately contain the token), plus the same `< 20` chars short-stub guard
+  the PDF route needs. Unlike the PDF route, a sentinel here does not mean "no note" — it means the
+  stub note (decision 1).
+- **The prompt asks for the title on a `제목:` line**, and the handler strips it off the body into
+  the frontmatter. The first draft scraped the title from the description's first sentence instead,
+  and the real-app run showed why that fails: descriptions are *sentences*, so the title came out
+  60 characters long and cut off mid-word, with a filename to match. The model gives a title in the
+  same call for free. A missing title line is not a failure — it falls back to the filename, then
+  `이미지`, without discarding a perfectly good description.
+- **The image is renamed to the note's own `YYMMDD-HHMM-<slug>` stem** so a note and its image sort
+  together in `.assets/`; collisions get `-2`, `-3`, … as everywhere else.
+- **A Telegram *photo* carries no file name at all.** Telethon's `_get_proper_filename` appends the
+  media's real extension when the target path has none (`if not ext: ext = extension`) and returns
+  the adjusted path — which is why `download_attachment` must use the **returned** path, not the one
+  it asked for. That is what makes a photo arrive as a readable `.jpg` rather than an extensionless
+  file the normalizer would try to convert. The test fake mirrors this deliberately; an earlier
+  version did not, and its "photo" test passed while quietly shelling out to the real `sips`.
+- **`_download`/`_safe_name` moved out of `document_handler`** into `handlers/downloads.py`
+  (`download_attachment` / `safe_name`), per the handoff. It lives under `handlers/` rather than
+  `files/` because it takes an `IncomingMessage`, which keeps the `handlers → files` dependency
+  direction intact. Increment 5 is the third caller.
+- **`Settings.assets_dir` is derived in `__post_init__`, not defaulted.** A static default would
+  point every hand-built `Settings` — i.e. every test fixture — at the **real vault**. Deriving it
+  from `inbox_dir.parent` means a temp inbox brings a temp `.assets` automatically.
+
+**Verification status.** Driven for real, end-to-end through `handle_image` against the real
+`claude` binary and the real `sips`, on a real Korean screenshot: both the `.png` path and the
+`.heic` path produced an accurate description, a faithful table transcription (every figure
+correct), a clean title, and an embed that resolves. The suite itself runs no model and shells out
+to no `sips` from the handler tests (`files/images.py`'s own tests do drive the real `sips`, which
+is local and offline — the same reasoning that has `test_claude_cli.py` drive a real subprocess).
+
+**Owner verification: pending.**
+
+### Next up: increment 4 — human-in-the-loop review plumbing
+
+**Status: not started.** Increments 1–3 are shipped. Increment 4 is the first one that is *not*
+one-shot, and increment 5 (audio) depends on it.
+
+Scope: `core/session_store.py`, `handlers/conversation.py`, and bot-DM `getUpdates` polling — see
+*Human-in-the-loop via session preservation* above for the state machine and the channel split
+(capture in Saved Messages, review in the bot DM, so a review reply is never re-ingested).
+
+**Build and test it on a simple case first** (the delivery approach's advice, and increments 1–3
+bear it out: each one's real surprise came from the real app, not the design). Do **not** wire it
+into the audio pipeline in the same increment.
+
+**What increments 1–3 leave you (do not re-invent):**
+
+- **`ClaudeCLI.run(…, session_id=…, resume=…)` and `resume_session` already exist** and are covered
+  by `test_claude_cli.py` against a real fake-CLI subprocess. `ClaudeResult.session_id` is captured
+  from the JSON. This is the piece the whole increment turns on, and it is built.
+- **The staging/isolation and side-effects-last rules are unchanged.** A review spans *turns*, so
+  the "all side effects after the last LLM call" rule gets harder, not easier: the draft is not the
+  note until the owner accepts it.
+- **The open question the handoff flagged** (still open): a failure mid-review strands a session in
+  `AWAITING_REVIEW`. The state machine must handle "cannot resume right now" without dropping the
+  draft. A `DeferMessage` mid-review is *not* obviously right — the message's handler already ran,
+  so a replay would re-run the whole job. Settle this at the start, and record the answer here.
+
+**Verification bar (same as increments 2–3):** unit tests with a mocked engine (no model runs), the
+whole suite green, then a real-app run. **Stop for owner confirmation before increment 5.**
 
 ## C. PDF → Markdown
 
@@ -583,8 +685,9 @@ the note embeds it and the description is accurate. **Stop for owner confirmatio
 
 ## Original-file policy (`files/originals.py`)
 
-Audio → delete after success · Image → keep (embedded) · pdf/pptx/docx/… → move to `~/Downloads/`
-· Markdown → save to inbox (it *is* the note).
+Audio → delete after success · **Image → keep, moved into the vault's `.assets/` and embedded
+(`move_into_assets` + `embed_link`, increment 3)** · pdf/txt/csv → move to `~/Downloads/`
+(`move_to_downloads`) · Markdown → save to inbox (it *is* the note).
 
 ## Open decisions
 
