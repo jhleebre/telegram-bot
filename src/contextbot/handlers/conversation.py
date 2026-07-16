@@ -331,6 +331,13 @@ async def handle_review_request(
     review.title = title or "검토 노트"
     review.questions = questions
     review.write_draft(body)
+    # The clock starts when the owner is *asked*, not when we started working. It was stamped at
+    # store.create() because the record needed one, but the draft turn sits in between — ~60s for a
+    # memo, minutes for audio once Whisper is in the path. created_at gates the poller's backlog
+    # filter, so anything the owner typed at the bot while we were drafting predates the question
+    # and cannot be an answer to it; left as-is it would sail through and be applied as a
+    # correction. Expiry reads better this way too: the 24h is time the *owner* left it unanswered.
+    review.created_at = datetime.now(timezone.utc)
     store.update(review)
 
     return HandlerResult(reply=review_block(review))

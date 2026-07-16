@@ -5,6 +5,7 @@ machine's promises, and the load-bearing one is negative — **a review never en
 owner's draft in their hands**, except when they said 취소.
 """
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -258,6 +259,31 @@ async def test_the_job_runs_in_the_reviews_stable_dir_not_a_temp_one(live, store
     assert engine.calls[0]["add_dirs"] == [cwd]
     # And it is still there after the handler returned — the point of the exercise.
     assert Path(cwd).is_dir()
+
+
+async def test_the_review_clock_starts_when_the_owner_is_asked(live, store):
+    """created_at gates the poller's backlog filter, so it must mean "the earliest moment this
+    could have been answered" — i.e. when the question went out, not when drafting began.
+
+    Those are a whole turn apart: ~60s for a memo, and *minutes* for audio once Whisper is in the
+    path. Anything the owner types at the bot while it is drafting predates the question and cannot
+    be an answer to it — but stamped before the call, it sails through the filter and is applied as
+    a correction, burning an LLM turn revising the note against "얼마나 걸려?".
+    """
+    drafted_at: datetime | None = None
+
+    class SlowEngine:
+        calls: list = []
+
+        async def run(self, prompt, **kwargs):
+            nonlocal drafted_at
+            await asyncio.sleep(0.02)  # the draft turn takes real time
+            drafted_at = datetime.now(timezone.utc)
+            return ClaudeResult(text=DRAFT)
+
+    await handle_review_request(memo(), live, engine=SlowEngine(), store=store)
+
+    assert store.pending().created_at >= drafted_at
 
 
 async def test_only_one_review_at_a_time(live, store):

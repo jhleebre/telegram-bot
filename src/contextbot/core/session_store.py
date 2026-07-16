@@ -67,9 +67,12 @@ class PendingReview:
     work_dir: Path
     draft_path: Path
     title: str
-    # When the *review* began. Drives expiry, and tells the poller which bot-DM messages could
-    # possibly be answers to it. Distinct from source_date on purpose: a memo captured at catch-up
-    # may be hours old, and anything the owner said to the bot in that gap answers something else.
+    # When the owner was **asked** — i.e. the earliest moment this review could have been answered.
+    # Drives expiry, and tells the poller which bot-DM messages could possibly be answers to it.
+    # `create` stamps it provisionally (the record needs a value) and the producer re-stamps it once
+    # the draft is ready, because the draft turn sits in between and is minutes long for audio.
+    # Distinct from source_date on purpose: a memo captured at catch-up may be hours old, and
+    # anything the owner said to the bot in that gap answers something else.
     created_at: datetime
     # The captured message's own date — what the finished note is dated by.
     source_date: datetime

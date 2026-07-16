@@ -918,6 +918,22 @@ Points worth knowing before touching this:
   second `#검토` replies "먼저 끝내주세요" and advances — *not* `DeferMessage`, which would halt the
   bot, stop the poller, and leave the open review permanently unanswerable. **This is the constraint
   increment 5 has to revisit** (below).
+- **Talking to the bot with no review open does nothing, silently.** Nothing polls when the store
+  is empty, so the message sits in Telegram's queue; when a review next opens, the first
+  `get_updates` runs with **no offset** and pulls the whole retained backlog, where the timestamp
+  filter drops it for predating the review. That is the *correct* outcome and not a small one — a
+  stray `확인` typed at the bot yesterday would otherwise instantly accept a draft the owner had
+  never seen. But the owner gets **no reply either way**, so the bot reads as broken. **This is the
+  natural home for a "talk to the bot to start something" feature** (it needs the poller running
+  whenever the app is up — cheap, and safe *because* the bot DM is not the capture channel), and
+  it is the open end of the "capture vs conversation" split. Not built; not increment 4's job.
+- **The clock starts when the owner is asked, not when the work began** — `created_at` is stamped
+  provisionally at `store.create()` and re-stamped once the draft is ready. The draft turn sits in
+  between, and it is ~60s for a memo but **minutes for audio**; anything typed at the bot during it
+  predates the question, so it cannot be an answer and must not pass the filter. **Turn 1 only** —
+  a revision must *not* re-stamp, because during a revise turn the poller is running and the
+  `FINALIZING` guard already answers a concurrent message with "잠시 후 다시 보내주세요". Re-stamping
+  there would silently drop a correction the owner really did send, which is strictly worse.
 - **The poller filters on two things, and the second is the one that matters.** Long polling returns
   whatever Telegram retained (24h), so a reply is accepted only if it is from the owner's DM **and
   sent after the review began**. Without the timestamp check, a message the owner typed at the bot
