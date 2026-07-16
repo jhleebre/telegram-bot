@@ -9,7 +9,9 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > *Increment 1 (as built)* (the engine's contract and the three real-world bugs it hit) →
 > *Increment 2 (as built)* (the file pipelines and the isolation the PDF route depends on) →
 > *Increment 3 (as built)* (images, and the format finding that route turns on) →
-> *Usage-limit policy* (binding on every later increment) → *Next up: increment 4*.
+> *Usage-limit policy* (binding on every later increment) → *Writing Markdown: ranges take a
+> hyphen* (binding on every prompt) → *Next up: increment 4* (**read its measured resume contract
+> before designing anything** — it rules out the staging pattern increments 2–3 use).
 > Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **337 passing**, no network or model runs.
 
 **Ingestion recap (from the Phase 1 hybrid):** input files arrive via **Saved Messages** (Telethon)
@@ -39,7 +41,7 @@ Recommended order (each is a self-contained milestone — ship and verify before
       `.txt`/`.csv` notes, `.pdf` conversion, unsupported → PDF-export reply. No review loop, no
       converter, no new dependency. **Shipped and owner-verified** — see "Increment 2 (as built)".
 - [x] **3. Image → described note** (`image_handler`, VLM via `claude -p`) — still no review loop.
-      **Shipped** — see "Increment 3 (as built)" below.
+      **Shipped and owner-verified** — see "Increment 3 (as built)" below.
 - [ ] **4. Human-in-the-loop plumbing** (`core/session_store.py`, `handlers/conversation.py`, bot-DM
       polling) — build and test the review state machine on a simple case first.
       **Next up** — the handoff is "Next up: increment 4" below.
@@ -535,6 +537,10 @@ IDLE ──job needs review──▶ AWAITING_REVIEW ──owner reply (bot DM)�
   finalization happen with full context. `확인`/`ok` accepts the draft as-is; `취소` aborts.
 - This is what makes multi-turn review work without re-sending context each turn, and is the key
   reason the engine is Claude Code sessions rather than one-shot API calls.
+- **A resumable session is tied to the job's working directory** (`~/.claude/projects/<slugified-
+  cwd>/<session-id>.jsonl`), so `temp_paths` above is not just tidiness — the review's directory
+  must outlive the turn that created it or the session dies with it. See the measured resume
+  contract under *Next up: increment 4*.
 
 ## A. Audio → meeting note (reuse `meeting-transcriber`)
 
@@ -689,11 +695,27 @@ Points worth knowing before touching this:
 **Verification status.** Driven for real, end-to-end through `handle_image` against the real
 `claude` binary and the real `sips`, on a real Korean screenshot: both the `.png` path and the
 `.heic` path produced an accurate description, a faithful table transcription (every figure
-correct), a clean title, and an embed that resolves. The suite itself runs no model and shells out
-to no `sips` from the handler tests (`files/images.py`'s own tests do drive the real `sips`, which
-is local and offline — the same reasoning that has `test_claude_cli.py` drive a real subprocess).
+correct), a clean title, and an image that round-trips (the base64 decodes back to the identical
+1000×620 picture). The suite itself runs no model and shells out to no `sips` from the handler
+tests (`files/images.py`'s own tests do drive the real `sips`, which is local and offline — the
+same reasoning that has `test_claude_cli.py` drive a real subprocess).
 
-**Owner verification: pending.**
+**Owner verification: ✅ done.** Photos sent from the real app become notes with the image visible
+in MarkNotes. The `.assets/` correction above came out of that review; re-verified after the switch
+to embedding.
+
+**Two lessons worth carrying forward** (both are the same shape, and increment 4 should expect a
+third):
+
+1. **Reading the *consumer's* source beat guessing — but only where we thought to look.** MarkNotes'
+   embed prefix and MIME map were read off its code and were right; the `.metadata.json` ledger sat
+   in the same folder and was dismissed as bookkeeping because it happened to be empty. The tests
+   could not have caught it: they assert *our* behaviour, and this was a contract with somebody
+   else's app.
+2. **Every "the model reports success" trap so far has been the same trap.** Increment 2: a blocked
+   `.docx` → it converted a neighbouring file. Increment 3: a `.heic` → it described the file
+   header. Both returned `is_error: False` with plausible output. **Assume the model would rather
+   answer than admit it cannot see**, and design so it never gets the chance.
 
 ### Next up: increment 4 — human-in-the-loop review plumbing
 
@@ -708,18 +730,70 @@ Scope: `core/session_store.py`, `handlers/conversation.py`, and bot-DM `getUpdat
 bear it out: each one's real surprise came from the real app, not the design). Do **not** wire it
 into the audio pipeline in the same increment.
 
+#### The resume contract — measured against the real CLI, and it constrains the design
+
+**Read this before designing anything.** `--resume` is what the whole increment stands on, and it
+does not behave the way increments 2–3's staging pattern assumes. Probed against CLI v2.1.187:
+
+| # | Situation | Result |
+|---|-----------|--------|
+| 1 | Resume from the **same cwd** | ✅ full context (`PURPLE-OTTER-42` recalled) |
+| 2 | Resume after the cwd was **deleted** | ❌ `No conversation found with session ID: …` |
+| 3 | Resume from a **different cwd** | ❌ same failure |
+| 4 | Resume after **recreating the same path** | ✅ works — lookup is by path *string* |
+| 5 | Resume in a **new process** | ✅ works (transcript is on disk) |
+| 6 | `--session-id <uuid>` to **pin** the id | ✅ honoured; resumable by that id |
+
+**The transcript lives in `~/.claude/projects/<slugified-cwd>/<session-id>.jsonl`.** Sessions are
+therefore scoped to the **working directory path**, and that is the trap:
+
+> **Increments 2–3 run every job with `cwd` = a `tempfile.TemporaryDirectory` that is deleted the
+> moment the handler returns.** Copy that pattern into a review and the session is unresumable
+> before the owner has even read the question. Row 4 says a recreated path would work, but relying
+> on the slug format is a hack — **give a review a stable directory** (e.g.
+> `state/reviews/<message_id>/`) that lives until the review ends, and clean it up then.
+
+That single fact settles several things for free: the staging **isolation** rule (stage the input
+alone; `cwd` + sole `--add-dir`) still applies and still matters, but the directory must now be
+*persistent-until-done* rather than a context manager. Row 5 is the good news — a review survives an
+app restart, which is exactly what the on-disk state store is for. Row 6 is better news: **pin the
+session id yourself**, and the state store can record a resumable handle *before* the call, so a
+crash mid-call still leaves something to resume rather than an orphan.
+
+**One failure mode to type.** A lost session surfaces today as a bare
+`ClaudeError: claude exited 1: No conversation found with session ID: …` — the CLI prints that as
+**non-JSON**, so `run()` falls through to its exit-code branch (verified). Increment 4 should
+detect it (a `ClaudeSessionLost`, alongside `ClaudeUsageLimit`) so the state machine can tell "this
+review is unrecoverable, hand the owner the draft" apart from "the engine is briefly unhappy".
+**Never let it strand a draft.**
+
 **What increments 1–3 leave you (do not re-invent):**
 
 - **`ClaudeCLI.run(…, session_id=…, resume=…)` and `resume_session` already exist** and are covered
   by `test_claude_cli.py` against a real fake-CLI subprocess. `ClaudeResult.session_id` is captured
-  from the JSON. This is the piece the whole increment turns on, and it is built.
-- **The staging/isolation and side-effects-last rules are unchanged.** A review spans *turns*, so
-  the "all side effects after the last LLM call" rule gets harder, not easier: the draft is not the
-  note until the owner accepts it.
-- **The open question the handoff flagged** (still open): a failure mid-review strands a session in
-  `AWAITING_REVIEW`. The state machine must handle "cannot resume right now" without dropping the
-  draft. A `DeferMessage` mid-review is *not* obviously right — the message's handler already ran,
-  so a replay would re-run the whole job. Settle this at the start, and record the answer here.
+  from the JSON. Both flags are measured above — the wrapper is ready; the *directory lifetime* is
+  the part that is not.
+- **`handlers/downloads.py`** is the shared download helper (increment 3 extracted it; audio is the
+  third caller).
+- **The reply bot is already there, and already async.** `core/client_service.py:62` builds
+  `telegram.Bot(token)` and wraps it in `core/notifier.py`'s send-only `Notifier` (whose `BotLike`
+  Protocol is what tests fake). python-telegram-bot 21.11.1 exposes
+  `Bot.get_updates(offset=…, timeout=…, allowed_updates=…, limit=…)`, so the review poller needs no
+  new dependency and no `Application`/`Updater` — just that call on the existing `Bot`, filtered to
+  the owner id, while `AWAITING_REVIEW`. Keep `Notifier` send-only and put polling beside it rather
+  than inside it; that split is what keeps capture unaffected by the 24h update-retention limit.
+- **The hermetic flags mean `CLAUDE.md` never reaches the bot** — see *Writing Markdown: ranges take
+  a hyphen* above. Any instruction a review turn depends on goes in the prompt template.
+- **The side-effects-last rule gets harder, not easier.** A review spans *turns*: the draft is not
+  the note until the owner accepts it, and the usage limit can now land on turn 2 rather than
+  turn 1.
+
+**The open question (still open — settle it first and record the answer here).** A failure mid-review
+strands a session in `AWAITING_REVIEW`. `DeferMessage` is *not* obviously right: the handler already
+ran, so a replay re-runs the whole job (for audio, that is Whisper again — minutes). Note the
+asymmetry the measurements above create — a **usage limit** on turn 2 is survivable (the session is
+on disk and resumes after the window resets, per row 5), but a **lost session** is not (nothing to
+resume). Those two probably want different answers.
 
 **Verification bar (same as increments 2–3):** unit tests with a mocked engine (no model runs), the
 whole suite green, then a real-app run. **Stop for owner confirmation before increment 5.**
