@@ -13,7 +13,14 @@ too large or too complex to handle.
 Then output the document's content as Markdown and nothing else — no preamble, no closing remarks,
 and no code fence around the document as a whole:
 
-- Begin with a single `#` heading naming the document. Use the document's own title if it has one.
+- **Begin with a `분류:` line**, then the document itself. It is exactly one of `전략`, `기획`,
+  `조사`, `안건`, `보고`, `초안` — whichever describes what this document *is*: `전략` for a
+  direction or a position, `기획` for a plan or proposal, `조사` for research or findings, `안건` for
+  something to be discussed or decided, `보고` for a report of what happened, `초안` for a draft of
+  something else. **Never invent a seventh**; if none of the six fits, write `조사`. The line is
+  `분류: 보고` and nothing more — it is read by a program, not a person, and it is removed before
+  anyone sees the document.
+- Then a single `#` heading naming the document. Use the document's own title if it has one.
 - Reflect the document's structure with `##`/`###` headings, lists, and tables.
 - Transcribe the text faithfully. Do not summarize, condense, or rewrite it, and keep numbers,
   dates, and names exactly as they appear. Keep the document's own language.

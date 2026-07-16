@@ -14,7 +14,7 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > increments 2–3 use) → *Increment 4 (as built)* (the review state machine) → *The decisions,
 > settled* → *Increment 5 (as built)* (audio, the queue, and the two silent bugs only real runs
 > found).
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **579 passing**, no network or model runs.
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **600 passing**, no network or model runs.
 >
 > **Phase 2 is complete.** Every pipeline in *Scope* is shipped and owner-verified. The one thing
 > deliberately left open is **open decision 6** (should the bot DM answer when nobody asked it
@@ -210,7 +210,7 @@ Points worth knowing before touching this:
   `handle_text` and the `.txt`/`.csv` route. It raises `DeferMessage` on a usage limit and swallows
   everything else into a `degraded` reason, which is what keeps the "call it before any side
   effect" rule enforceable in one place.
-- **`.md` filenames are normalized** to the vault's `YYMMDD-HHMM-<slug>.md`, so a sent note sorts
+- **`.md` filenames are normalized** to the vault's `YYMMDD-<분류>-<slug>.md`, so a sent note sorts
   into the inbox with the rest. Only the *name* changes — the content is written byte-for-byte,
   frontmatter and all. (`.markdown` becomes `.md`.)
 - **Caps** (all in `document_handler`): 2MB per file, 200 CSV rows, 50,000 characters of `.txt`.
@@ -1236,12 +1236,13 @@ Delivered: `stt/whisper.py` (the port) + `scripts/download_model.py`, `files/glo
 `handlers/audio_handler.py` (the producer), `engine/prompts/meeting_note.md` +
 `meeting_glossary.md`, the queue in `core/session_store.py` (`ReviewState.QUEUED`, `note_type`,
 `tags`), `conversation.activate` / `promote_next` / `_accept`, the `whisper-stt` and `glossary`
-health probes, five settings, and the **deletion of the `#검토` scaffolding**. Suite: 474 → **579**
+health probes, five settings, the vault's **filename convention** across every route, and the
+**deletion of the `#검토` scaffolding**. Suite: 474 → **600**
 (it peaked at 601 and *drops* here, because the scaffolding's ~28 tests went with their subject).
 
 **The decisions above all held.** What follows is what building it changed or found.
 
-#### Two things the vault knew and this document did not
+#### Three things the vault knew and this document did not
 
 1. **`type: meeting-note`, not `type: meeting`.** The handoff above says a meeting note wants
    `type: meeting`. The vault has **35 notes with `type: meeting-note` and zero with `meeting`** —
@@ -1252,6 +1253,8 @@ health probes, five settings, and the **deletion of the `#검토` scaffolding**.
    Phase 2 that reading it beat guessing.
 2. **The section headings really are English** (`## Overview` / `## Summary` / `## Discussion
    Points`), Korean content underneath, confirming `SKILL.md`'s template against real notes.
+3. **The filename is `YYMMDD-<분류>-<topic>`**, and the bot's own `YYMMDD-HHMM-` appears in the vault
+   **zero** times — see *The filename convention* below.
 
 #### The audio does **not** go in the work dir (a deviation from the handoff)
 
@@ -1339,6 +1342,46 @@ exists to prevent, reintroduced by the machinery meant to prevent them"*). That 
 across two increments** found by reading the diff or looking at the app, rather than by running the
 suite. Budget for it. **And note what caught the third: a screenshot.** Every probe added to
 `health.py` is a line in a fixed-size panel, and nothing in the suite had ever looked at it.
+
+#### The filename convention — the vault's, and the third time reading it beat guessing
+
+Every note is now `YYMMDD-<분류>-<topic>.md`, matching the vault. **The bot's own `YYMMDD-HHMM-`
+convention does not appear in the vault even once**, so there was never anything to stay consistent
+with — only a convention to join. Of the 181 notes there, 103 carry a two-syllable Korean category:
+회의 (41), 전략 (40), 조사 (12), 보고 (3), 안건 (2), and one each of 초안/의견/배경/기획.
+
+It is a **filename slot, not a frontmatter tag** — the vault's meeting notes carry tags like
+`에이닷`/`B2B` and never `회의`. Don't write it in both.
+
+| Route | 분류 | Decided by |
+|-------|------|-----------|
+| audio (meeting note **and** the transcript-only fallback) | `회의` | the handler — a recording is a meeting whether or not the note got made |
+| text, image | `노트` | the handler — the owner's call: a message or a screenshot is a note |
+| `.txt` / `.csv` | one of the six | `text_enrich`'s JSON gained a `category` field |
+| `.pdf` | one of the six | `pdf_to_markdown` gained a `분류:` first line |
+| `.md` passthrough | `노트` | nothing read it — that route never calls the engine (increment 2) |
+
+**The document category rides a call that already happens**, in both cases: classifying a document
+is not worth a second round trip when a model is already reading it. Two guards make that safe:
+
+- **The set is closed** (`전략 기획 조사 안건 보고 초안`) and anything outside it becomes `노트`.
+  The category is interpolated into a *filename*, so an open set would let a model's improvisation —
+  or a `/` — name a file. `노트` is the honest answer for "we could not tell".
+- **`normalize_category` NFC-normalizes first**, and that is not paranoia: the vault already holds
+  one `전략` written as **decomposed jamo (NFD)** beside 40 composed ones. "The model said 전략" and
+  "the string equals 전략" are not the same question, and without this an NFD answer would silently
+  fall back to `노트` with nothing on screen to explain why.
+
+The `분류:` line is stripped before the note is written — the same shape as the `태그:` line, and the
+same failure if it isn't (it becomes the document's first line). A conversion that *forgets* the line
+is not a failed conversion: it falls back to `노트` rather than costing the owner a note the model
+did produce. **Driven for real**: a strategy PDF → `260716-전략-…`, an agenda `.txt` →
+`260716-안건-…`, with no leak into either body.
+
+`build_filename` takes `category` with **no default**, deliberately: it is a claim about what the
+note *is*, and every route knows its own answer — a default would let a new route silently inherit
+someone else's. Dropping `HHMM` also means two notes in one day can now collide, which `unique_path`
+already handled.
 
 #### Points worth knowing before touching this
 

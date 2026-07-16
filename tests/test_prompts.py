@@ -12,7 +12,24 @@ def test_render_substitutes_text():
 def test_render_keeps_literal_json_braces():
     """The JSON shape example must survive str.format (doubled braces in the template)."""
     out = prompts.render("text_enrich", text="x")
-    assert '{"title": "...", "tags": ["...", "..."], "summary": "..."}' in out
+    assert '{"title": "...", "tags": ["...", "..."], "summary": "...", "category": "..."}' in out
+
+
+def test_text_enrich_constrains_the_category_to_the_vaults_six():
+    """The category names a file, so an open set would let the model improvise a filename.
+
+    It rides this call rather than earning one of its own: classifying a document is not worth a
+    second round trip when a model is already reading it.
+    """
+    out = _unwrapped("text_enrich")
+    assert "**exactly one** of `전략`, `기획`, `조사`, `안건`, `보고`, `초안`" in out
+    assert "never invent a seventh" in out
+
+
+def test_pdf_template_asks_for_the_category_line():
+    out = _unwrapped("pdf_to_markdown")
+    assert "Begin with a `분류:` line" in out
+    assert "never invent a seventh" in out.lower() or "**Never invent a seventh**" in out
 
 
 def test_pdf_template_carries_the_path_and_sentinel():

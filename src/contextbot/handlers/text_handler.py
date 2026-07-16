@@ -21,6 +21,7 @@ from ..engine import prompts
 from ..engine.claude_cli import ClaudeCLI, ClaudeError, ClaudeUsageLimit, build_engine
 from ..engine.parsing import ParseError, extract_json_object
 from ..notes.markdown_writer import write_note
+from ..notes.naming import NOTE_CATEGORY, normalize_category
 from .base import DeferMessage, HandlerResult, IncomingMessage
 
 logger = logging.getLogger("contextbot.handlers.text")
@@ -45,6 +46,11 @@ class Enrichment:
     title: str
     tags: list[str]
     summary: str | None = None
+    # The vault's filename slot, for a note that came from a *file* (`YYMMDD-보고-…`). Read only by
+    # the document routes: a typed message is always 노트, so `handle_text` ignores this. It rides
+    # this call rather than earning one of its own — classifying a document is not worth a second
+    # round trip when a model is already reading it.
+    category: str = NOTE_CATEGORY
 
 
 def _derive_title(text: str) -> str:
@@ -111,6 +117,8 @@ async def enrich(text: str, engine: ClaudeCLI) -> Enrichment | None:
         title=title,
         tags=_clean_tags(data.get("tags")),
         summary=_clean_summary(data.get("summary")),
+        # Anything outside the six becomes 노트 — the model does not get to name a file.
+        category=normalize_category(data.get("category")),
     )
 
 
@@ -171,6 +179,7 @@ async def handle_text(
 
     path = write_note(
         inbox_dir=settings.inbox_dir,
+        category=NOTE_CATEGORY,
         body=text,
         title=title,
         when=message.date,

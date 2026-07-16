@@ -53,6 +53,10 @@ client can read Saved Messages history, which removes the 24h limit entirely.
     right away, and you are asked about it when the first review ends. See below — **the Whisper
     model is a one-time download you have to run**.
 
+  Notes are filed the way the rest of your vault is: **`YYMMDD-<분류>-<제목>.md`**. A recording is
+  `회의`, a message or screenshot is `노트`, and a document is classified from its own content into
+  one of `전략` / `기획` / `조사` / `안건` / `보고` / `초안`.
+
   See [docs/PHASE2.md](docs/PHASE2.md).
 
   **Documents are PDF-only by design.** Export from Word/PowerPoint to PDF and send that — Claude

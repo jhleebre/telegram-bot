@@ -113,7 +113,7 @@ async def test_markdown_is_saved_as_is(settings):
 
 async def test_markdown_filename_follows_the_vault_convention(settings):
     result = await handle_document(_msg("My Idea.md", b"# x"), settings)
-    assert result.saved_path.name == "260715-1430-my_idea.md"
+    assert result.saved_path.name == "260715-노트-my_idea.md"
 
 
 async def test_markdown_never_calls_the_engine(llm_settings):
@@ -131,7 +131,7 @@ async def test_markdown_original_is_not_moved_to_downloads(settings):
 async def test_markdown_collision_gets_a_suffix(settings):
     await handle_document(_msg("idea.md", b"# one"), settings)
     second = await handle_document(_msg("idea.md", b"# two"), settings)
-    assert second.saved_path.name == "260715-1430-idea-2.md"
+    assert second.saved_path.name == "260715-노트-idea-2.md"
 
 
 async def test_markdown_in_cp949(settings):
@@ -517,3 +517,53 @@ async def test_a_message_without_an_attachment_is_a_fault(settings):
     message.raw = None
     with pytest.raises(RuntimeError):
         await handle_document(message, settings)
+
+
+# ------------------------------------------- the vault's filename category slot
+async def test_a_pdf_is_filed_under_the_category_the_model_read(settings, tmp_path):
+    """A file *is* a document, and only the model that read it can say what kind."""
+    engine = FakeEngine(text="분류: 보고\n\n# 3분기 실적 보고서\n\n실적은 목표를 넘었다.")
+    live = replace(settings, claude_enabled=True)
+
+    result = await handle_document(_msg("report.pdf", b"%PDF-1.4"), live, engine=engine)
+
+    assert result.saved_path.name == "260715-보고-3분기_실적_보고서.md"
+
+
+async def test_the_category_line_never_reaches_the_note_body(settings, tmp_path):
+    """It is addressed to a program. Left in, it is the document's first line — the same shape as
+    the 태그: line increment 5 had to strip out of meeting notes."""
+    engine = FakeEngine(text="분류: 전략\n\n# 방향성\n\n본문입니다.")
+    live = replace(settings, claude_enabled=True)
+
+    result = await handle_document(_msg("plan.pdf", b"%PDF-1.4"), live, engine=engine)
+
+    body = result.saved_path.read_text(encoding="utf-8")
+    assert "분류:" not in body
+    assert body.rstrip().endswith("본문입니다.")
+
+
+async def test_a_conversion_without_a_category_line_still_becomes_a_note(settings):
+    """A forgetful model has not failed — never cost the owner a note it did produce."""
+    engine = FakeEngine(text="# 제목입니다\n\n본문이 충분히 깁니다.")
+    live = replace(settings, claude_enabled=True)
+
+    result = await handle_document(_msg("x.pdf", b"%PDF-1.4"), live, engine=engine)
+
+    assert result.saved_path.name == "260715-노트-제목입니다.md"
+
+
+async def test_an_invented_category_falls_back_rather_than_naming_the_file(settings):
+    engine = FakeEngine(text="분류: 전략기획보고서\n\n# 제목\n\n본문이 충분히 깁니다.")
+    live = replace(settings, claude_enabled=True)
+
+    result = await handle_document(_msg("x.pdf", b"%PDF-1.4"), live, engine=engine)
+
+    assert result.saved_path.name.startswith("260715-노트-")
+
+
+async def test_a_sent_markdown_file_is_a_note(settings):
+    """This route never calls the engine, so nobody read the document to classify it."""
+    result = await handle_document(_msg("idea.md", "# 아이디어".encode()), settings)
+
+    assert result.saved_path.name == "260715-노트-idea.md"

@@ -30,7 +30,7 @@ from ..engine.claude_cli import ClaudeCLI, ClaudeError, ClaudeUsageLimit, build_
 from ..files.originals import move_to_downloads
 from ..files.text_files import DecodeError, decode_text, render_csv_table
 from ..notes.markdown_writer import write_note, write_text
-from ..notes.naming import build_filename
+from ..notes.naming import NOTE_CATEGORY, build_filename, normalize_category
 from .base import DeferMessage, HandlerResult, IncomingMessage, MessageKind
 from .downloads import download_attachment as _download
 from .text_handler import clean_title, enrich_or_fallback
@@ -68,6 +68,10 @@ _PDF_MIN_OUTPUT_CHARS = 20
 # the anti-fabrication guarantee holds. Bounded so a truly bad file can't burn the plan allowance.
 _PDF_MAX_ATTEMPTS = 3
 
+# The conversion's first line: which of the vault's six document categories this is. Addressed to a
+# program, so it is stripped before the note is written (see _split_category).
+_CATEGORY_PREFIX = "분류:"
+
 _PDF_SYSTEM_PROMPT = (
     "You are a document-to-Markdown converter for a personal knowledge base. "
     "You transcribe faithfully and never invent content you could not read."
@@ -92,7 +96,7 @@ async def _handle_markdown(message: IncomingMessage, settings: Settings) -> Hand
     """Save a sent `.md` file straight into the inbox: it already *is* the note.
 
     The content is untouched (frontmatter included, if it has any). Only the filename is
-    normalized to the vault's ``YYMMDD-HHMM-<slug>.md`` convention, so a sent note sorts into the
+    normalized to the vault's ``YYMMDD-<분류>-<slug>.md`` convention, so a sent note sorts into the
     inbox alongside the ones the bot writes.
     """
     with tempfile.TemporaryDirectory(prefix="contextbot-md-") as tmp:
@@ -105,9 +109,12 @@ async def _handle_markdown(message: IncomingMessage, settings: Settings) -> Hand
         except DecodeError as exc:
             return HandlerResult(reply=f"📄 {src.name} 을(를) 읽지 못했습니다 — {exc}")
 
+        # 노트, not a classification: this route never calls the engine (increment 2 — a sent .md
+        # is saved byte-for-byte, no conversion, no LLM), so there is nobody to read the document
+        # and say what it is. Adding a call just to name the file would be the tail wagging the dog.
         path = write_text(
             directory=settings.inbox_dir,
-            filename=build_filename(src.stem, message.date),
+            filename=build_filename(src.stem, message.date, category=NOTE_CATEGORY),
             content=content,
         )
     return HandlerResult(reply=f"📝 저장됨: {path.name}", saved_path=path)
@@ -183,6 +190,10 @@ async def _handle_text_like(
             body=body,
             title=title,
             when=message.date,
+            # A file *is* a document, so it gets classified — but only the model that read it can
+            # say what kind. Degraded enrichment falls back to 노트, which is the honest answer for
+            # "nobody looked".
+            category=enrichment.category if enrichment else NOTE_CATEGORY,
             source="telegram",
             note_type="document",
             tags=enrichment.tags if enrichment else [],
@@ -209,6 +220,20 @@ def _conversion_failed(text: str) -> bool:
         return True
     first_line = stripped.splitlines()[0].strip().strip("`*# ")
     return first_line.startswith(_SENTINEL)
+
+
+def _split_category(body: str) -> tuple[str, str]:
+    """Pull the model's ``분류:`` line off the front of a conversion; return (category, body).
+
+    Stripped rather than kept, because it is addressed to a program: left in, it would be the first
+    line of the saved document. The line is optional — a conversion that forgets it is not a failed
+    conversion, so it falls back to 노트 rather than costing the owner a note the model did produce.
+    """
+    stripped = body.lstrip()
+    first, _, rest = stripped.partition("\n")
+    if not first.strip().startswith(_CATEGORY_PREFIX):
+        return NOTE_CATEGORY, body
+    return normalize_category(first.strip()[len(_CATEGORY_PREFIX) :]), rest.strip()
 
 
 def _title_from_markdown(body: str, fallback: str) -> str:
@@ -291,12 +316,14 @@ async def _handle_pdf(
                 reply=_pdf_failed_reply(src.name, "문서를 읽지 못했습니다", moved)
             )
 
+        category, body = _split_category(body)
         title = _title_from_markdown(body, src.stem)
         path = write_note(
             inbox_dir=settings.inbox_dir,
             body=body,
             title=title,
             when=message.date,
+            category=category,
             source="telegram",
             note_type="document",
             tags=[],

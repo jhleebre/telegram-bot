@@ -187,7 +187,7 @@ async def test_title_comes_from_the_model_not_the_filename(llm_settings):
     result = await handle_image(_msg("IMG_4821.png"), llm_settings, engine=FakeEngine())
 
     assert _fm(result.saved_path)["title"] == "3분기 인프라 예산 검토 화면"
-    assert result.saved_path.name == "260715-1430-3분기_인프라_예산_검토_화면.md"
+    assert result.saved_path.name == "260715-노트-3분기_인프라_예산_검토_화면.md"
 
 
 async def test_the_title_line_is_not_repeated_in_the_body(llm_settings):

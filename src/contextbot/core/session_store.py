@@ -91,6 +91,11 @@ class PendingReview:
     # its frontmatter, and only a reader who looks will ever notice.
     note_type: str = "note"
     tags: list[str] = field(default_factory=list)
+    # The vault's filename slot (`YYMMDD-회의-…`). Travels with the review for the same reason
+    # note_type does: it is the *producer's* claim about what this note is, and the shared writer
+    # has no way to know. Distinct from note_type on purpose — `meeting-note` is the frontmatter
+    # `type:`, `회의` is the filename, and the vault uses both, differently.
+    category: str = "노트"
 
     @property
     def review_dir(self) -> Path:
@@ -142,6 +147,7 @@ class PendingReview:
             "questions": self.questions,
             "note_type": self.note_type,
             "tags": list(self.tags),
+            "category": self.category,
         }
 
     @classmethod
@@ -161,6 +167,7 @@ class PendingReview:
             # review written by the previous version still loads.
             note_type=str(data.get("note_type") or "note"),
             tags=list(data.get("tags") or []),
+            category=str(data.get("category") or "노트"),
         )
 
 
@@ -259,6 +266,7 @@ class SessionStore:
         source_date: datetime,
         created_at: datetime | None = None,
         note_type: str = "note",
+        category: str = "노트",
     ) -> PendingReview:
         """Reserve a review: make its stable directories and record the resume handle.
 
@@ -285,6 +293,7 @@ class SessionStore:
             source_date=source_date,
             state=ReviewState.QUEUED,
             note_type=note_type,
+            category=category,
         )
         self._put(review)
         logger.info("review %s created (session=%s)", message_id, session_id)

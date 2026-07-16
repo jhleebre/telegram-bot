@@ -40,7 +40,7 @@ from ..engine.claude_cli import ClaudeCLI, ClaudeError, ClaudeUsageLimit, build_
 from ..files.images import ImageError, normalize, to_data_url
 from ..files.originals import move_to_downloads
 from ..notes.markdown_writer import write_note
-from ..notes.naming import slugify
+from ..notes.naming import NOTE_CATEGORY, slugify
 from .base import DeferMessage, HandlerResult, IncomingMessage
 from .downloads import download_attachment
 from .text_handler import clean_title
@@ -257,6 +257,7 @@ def _write(
 
     path = write_note(
         inbox_dir=settings.inbox_dir,
+        category=NOTE_CATEGORY,
         body=_body(embed, description, reason),
         title=title,
         when=message.date,

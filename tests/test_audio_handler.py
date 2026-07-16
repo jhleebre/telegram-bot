@@ -536,3 +536,20 @@ async def test_a_leftover_download_is_reused_when_its_transcript_is_there(live, 
     await handle_audio(audio_message(), live, engine=FakeEngine(), store=store)
 
     assert fake_stt == [], "neither the download nor Whisper should run again"
+
+
+async def test_a_meeting_note_is_filed_as_회의(live, store, fake_stt):
+    """The vault's convention: `YYMMDD-회의-<topic>`, matching its 41 existing meeting notes."""
+    await handle_audio(audio_message(), live, engine=FakeEngine(), store=store)
+    from contextbot.handlers.conversation import handle_reply
+
+    await handle_reply("확인", live, store=store, engine=FakeEngine(ClaudeResult(text="NONE")))
+
+    assert notes(live)[0].name == "260715-회의-3분기_인프라_예산_회의.md"
+
+
+async def test_a_transcript_only_note_is_still_a_meeting(live, store, fake_stt):
+    """The recording was still a meeting — the bot just could not make the note."""
+    await handle_audio(audio_message(), live, engine=FakeEngine(ClaudeError("boom")), store=store)
+
+    assert notes(live)[0].name.startswith("260715-회의-")

@@ -228,7 +228,7 @@ def split_tags(body: str) -> tuple[list[str], str]:
 def _write(review: PendingReview, settings: Settings, *, unreviewed: str | None = None) -> Path:
     """Write the draft as a note. ``unreviewed`` marks one the owner never accepted.
 
-    ``note_type`` and ``tags`` come off the *review*, not from here. They were hardcoded to
+    ``note_type``, ``tags`` and ``category`` come off the *review*, not from here. They were hardcoded to
     ``"note"`` / ``[]`` while `#검토` was the only producer, which was the memo's answer smuggled
     into shared code — a meeting note would have landed as `type: note`, and nothing would have
     failed to say so.
@@ -245,6 +245,7 @@ def _write(review: PendingReview, settings: Settings, *, unreviewed: str | None 
         title=review.title,
         when=review.source_date,
         source="telegram",
+        category=review.category,
         note_type=review.note_type,
         tags=review.tags,
         extra={"telegram_message_id": review.message_id, "reviewed": unreviewed is None},

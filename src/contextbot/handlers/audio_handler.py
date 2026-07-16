@@ -45,6 +45,7 @@ from ..core.session_store import SessionStore, build_store
 from ..engine import prompts
 from ..engine.claude_cli import ClaudeCLI, ClaudeError, ClaudeUsageLimit, build_engine
 from ..notes.markdown_writer import write_note
+from ..notes.naming import MEETING_CATEGORY
 from ..stt import whisper
 from .base import DeferMessage, HandlerResult, IncomingMessage
 from .conversation import (
@@ -225,6 +226,7 @@ async def _draft(
         title="회의록 작성 중",
         source_date=message.date,
         note_type=NOTE_TYPE,
+        category=MEETING_CATEGORY,
     )
 
     # Stage the transcript alone in the work dir: it is the cwd *and* the only --add-dir, so this
@@ -341,6 +343,7 @@ def _transcript_note(
     """
     path = write_note(
         inbox_dir=settings.inbox_dir,
+        category=MEETING_CATEGORY,
         body=f"> ⚠️ 회의록을 만들지 못해 전사 원문만 저장했습니다 — {reason}\n\n{transcript}",
         title=_fallback_title(message),
         when=message.date,

@@ -40,6 +40,7 @@ def write_note(
     body: str,
     title: str,
     when: datetime,
+    category: str,
     source: str = "telegram",
     note_type: str = "note",
     tags: list[str] | None = None,
@@ -48,8 +49,9 @@ def write_note(
 ) -> Path:
     """Render and atomically write a note; return the final path.
 
-    ``slug_source`` controls the filename slug (defaults to ``title``). The write is atomic
-    (see :func:`write_text`).
+    ``category`` is the vault's filename slot (``YYMMDD-회의-…``) and has no default — see
+    :func:`~contextbot.notes.naming.build_filename`. ``slug_source`` controls the slug (defaults to
+    ``title``). The write is atomic (see :func:`write_text`).
     """
     frontmatter = build_frontmatter(
         title=title,
@@ -61,6 +63,8 @@ def write_note(
     )
     return write_text(
         directory=inbox_dir,
-        filename=build_filename(slug_source if slug_source is not None else title, when),
+        filename=build_filename(
+            slug_source if slug_source is not None else title, when, category=category
+        ),
         content=render_note(frontmatter, body),
     )
