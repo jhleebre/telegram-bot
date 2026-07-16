@@ -13,8 +13,8 @@ It uses **two Telegram channels for two jobs**:
   bot chat. Replying *into* Saved Messages would loop, so replies use the separate bot channel.
 
 The bot **does not run in the background** — it only reads while the desktop app window is open.
-The window is a single compact row: a status dot, what the bot is doing, Start/Stop, and a one-line
-health summary. Expand it (`⌄`) when you want the full health panel and the activity log.
+The window is a single compact row: a round start/stop button, what the bot is doing, and a health
+light. Expand it (`⌄`) when the light is amber or red, or when you want the activity log.
 
 ## Why this design
 
@@ -136,12 +136,11 @@ you enter your own credentials.)
 .venv/bin/python run.py
 ```
 
-The window opens as one row with a **gray 😴 (stopped)** dot. Click **Start**; it turns
-**green 🤖 (running)** once the health checks pass, and the health summary reads `🟢 정상`.
+The window opens as one row: a green **▶** button, and the line `잠자는 중 — Start를 눌러
+깨워주세요`. Click it; the button turns into a red **■** and the row says what the bot is doing.
 
-That summary is the whole point of the collapsed view: when something is wrong it names the probe
-(`🟡 whisper-stt`) rather than making you expand to find out. Click `⌄` for the details — all seven
-probes and the activity log — and `⌃` to shrink back.
+The dot on the right is the **health light** — green is fine, amber and red mean expand. Hovering it
+names the probe (`🟡 whisper-stt`); `⌄` shows all seven and the activity log, `⌃` shrinks back.
 
 Most failures are **degraded, not error**: a missing `claude` CLI still captures notes (just without
 LLM titles/tags), and a missing Whisper model only stops audio. The **claude-engine** probe shows the

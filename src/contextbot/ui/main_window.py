@@ -1,14 +1,23 @@
 """Main application window: a compact status bar that expands on demand.
 
-**Collapsed is the normal state**, and it is one row — status dot, what the bot is doing, the
-Start/Stop button, and a one-line health summary. That is the whole app most of the time, because
-that is the whole question most of the time ("is it on, and is anything wrong?"). Expanding drops
-the full health panel and the activity log underneath it, which is where you go when the summary
-says something is wrong.
+**Collapsed is the normal state**, and it is one row:
 
-The earlier layout showed all of it, always: a large centred status face, seven probe lines, and a
-log pane, in a window that was 600px of mostly-empty card. It also *blinked* — the face pulsed on a
-loop whenever the bot was working. Both are gone.
+    (▶)  잠자는 중 — Start를 눌러 깨워주세요                        ●  ⌄
+    play  what the bot is doing                              health  expand
+
+That is the whole app most of the time, because that is the whole question most of the time ("is it
+on, and is anything wrong?"). The light answers the second half by colour alone; when it is amber or
+red, expanding shows the full health panel and the activity log, which is where the answer actually
+is.
+
+Three things it deliberately does not do:
+
+- **It does not animate.** The status used to be a large emoji face that pulsed on a loop while the
+  bot worked, so the app blinked for as long as it was doing its job.
+- **It does not say the same thing twice.** The face, a bold status name, *and* a tagline all
+  described one state; the tagline says it best, so it is the one that stayed.
+- **It does not reflow.** Every column but the message is fixed-width, so nothing shifts as the text
+  or the health changes underneath it.
 
 Styling is self-contained QSS so the look is consistent regardless of the system theme.
 """
@@ -28,27 +37,30 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..core.status import BotStatus
+from ..core.health import HEALTH_COLORS, HEALTH_UNKNOWN_COLOR, HealthStatus
+from ..core.status import STATUS_TAGLINES, BotStatus
 from .bot_worker import BotWorker
 from .elided_label import ElidedLabel
-from .status_widget import StatusWidget
 
 _HEALTH_INTERVAL_MS = 15_000
 _MAX_LOG_BLOCKS = 500
 
-# The collapsed row's columns are **fixed**, and that is the whole point of these numbers. Sized to
-# content, every column moved whenever anything changed: `🟢 정상` → `🟡 whisper-stt` shoved the
-# Start button 51px left, and `▶ Start` → `■ Stop` twitched it another 2px. A status bar that
-# rearranges itself while you read it is worse than one that wastes a little space, so each column
-# is wide enough for its worst case and the message column absorbs all the slack.
-_BUTTON_WIDTH = 96      # fits "▶  Start" and "■  Stop" identically
-_HEALTH_WIDTH = 150     # fits "🟡 whisper-stt"; longer lists elide (the tooltip and ⌄ have them all)
+# The row's columns. Everything except the message is **fixed**, and that is the point: sized to
+# content, every column moved whenever anything changed underneath it — a status bar that
+# rearranges itself while you read it is worse than one that wastes a few pixels.
+_PLAY_SIZE = 36
+_LIGHT_SIZE = 12
 _EXPAND_WIDTH = 26
 
-# Symmetric, and tight. The bar used to be built with `_card("")` — an empty heading label plus its
-# spacing, padding the top for nothing — and then the window layout handed it the *hidden* detail
-# panel's stretch, so it grew past its own sizeHint and dumped the slack underneath: 16px above the
-# row, 21px below. Both are gone: no heading, and the bar is Fixed vertically.
+# The one elastic column, and it is deliberately generous — a short message and a long one should
+# both look like they belong. Measured against the taglines rather than picked: the longest is 188px
+# ("문제가 생겼어요 — 로그를 확인해주세요"), so below ~200 the window would open with its own status
+# message already elided. Live messages can be longer; those elide, which is what the stretch is for.
+_MESSAGE_MIN_WIDTH = 300
+
+# Symmetric, and tight. The bar is built by hand rather than with `_card`, whose title label would
+# pad the top for nothing, and it is Fixed vertically so the hidden detail panel's stretch cannot
+# be handed to it and dumped inside as slack.
 _BAR_MARGIN = 8
 
 _STYLESHEET = """
@@ -66,36 +78,28 @@ QLabel#cardTitle {
     color: #9aa0b5;
 }
 QLabel#tagline {
-    font-size: 12px;
-    color: #7b8199;
-}
-QLabel#healthSummary {
-    font-size: 12px;
-    font-weight: 600;
+    font-size: 13px;
     color: #3a3f57;
 }
 QLabel#health {
     font-size: 12px;
     color: #3a3f57;
 }
-#toggle {
+#play {
     border: none;
-    border-radius: 15px;
-    padding: 7px 16px;
-    font-size: 13px;
-    font-weight: 800;
+    border-radius: 18px;
+    font-size: 12px;
     color: #ffffff;
     background-color: #2ecc71;
 }
-#toggle:hover { background-color: #29b765; }
-#toggle[running="true"] { background-color: #e74c3c; }
-#toggle[running="true"]:hover { background-color: #d1412f; }
+#play:hover { background-color: #29b765; }
+#play[running="true"] { background-color: #e74c3c; }
+#play[running="true"]:hover { background-color: #d1412f; }
 #expand {
     border: none;
     background: transparent;
     color: #9aa0b5;
     font-size: 14px;
-    padding: 4px 6px;
 }
 #expand:hover { color: #3a3f57; }
 QPlainTextEdit#log {
@@ -106,6 +110,11 @@ QPlainTextEdit#log {
     padding: 8px;
 }
 """
+
+# Text-presentation variation selector: without it macOS renders ▶ as the colour emoji ▶️, which is
+# the opposite of a plain glyph on a coloured button.
+_PLAY_GLYPH = "▶︎"
+_STOP_GLYPH = "■︎"
 
 
 def _card(title: str) -> tuple[QFrame, QVBoxLayout]:
@@ -131,25 +140,34 @@ class MainWindow(QWidget):
         self.setWindowTitle("🤖 Context Bot")
         self.setStyleSheet(_STYLESHEET)
         # **No explicit minimum size, in either direction.** The layout's own minimumSizeHint is the
-        # floor, and every attempt to second-guess it here has been the same bug three times over: a
-        # constant smaller than what the content needs does not shrink the window, it lets Qt squeeze
-        # the children past their own minimums and clip them, silently. It hid the health panel's
-        # last two probes at 620 (the layout wanted 768), and then hid the expand button and half the
-        # health summary at 460 (the row wants 592). The layout already knows both numbers.
+        # floor, and every attempt to second-guess it here has been the same bug: a constant smaller
+        # than what the content needs does not shrink the window, it lets Qt squeeze the children
+        # past their own minimums and clip them, silently. It hid the health panel's last two probes
+        # at 620 (the layout wanted 768), then the expand button at 460 (the row wants ~460). The
+        # layout already knows both numbers.
 
-        # ---- the collapsed row: everything the owner normally needs, and nothing else.
-        self._status_widget = StatusWidget()
+        # ---- the collapsed row.
+        self._play_btn = QPushButton(_PLAY_GLYPH)
+        self._play_btn.setObjectName("play")
+        self._play_btn.setCursor(Qt.PointingHandCursor)
+        self._play_btn.setProperty("running", False)
+        self._play_btn.setFixedSize(_PLAY_SIZE, _PLAY_SIZE)
+        self._play_btn.setToolTip("시작")
+        self._play_btn.clicked.connect(self._on_toggle)
 
-        self._toggle_btn = QPushButton("▶  Start")
-        self._toggle_btn.setObjectName("toggle")
-        self._toggle_btn.setCursor(Qt.PointingHandCursor)
-        self._toggle_btn.setProperty("running", False)
-        self._toggle_btn.setFixedWidth(_BUTTON_WIDTH)
-        self._toggle_btn.clicked.connect(self._on_toggle)
+        self._message = ElidedLabel()
+        self._message.setObjectName("tagline")
+        # `Ignored` so it may shrink below its own text — a QLabel's minimum width is the whole
+        # string, so any other policy would shove its neighbours off the row rather than elide — plus
+        # an explicit minimum for the row to reserve.
+        self._message.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._message.setMinimumWidth(_MESSAGE_MIN_WIDTH)
 
-        self._health_summary = ElidedLabel("—")
-        self._health_summary.setObjectName("healthSummary")
-        self._health_summary.setFixedWidth(_HEALTH_WIDTH)
+        # A light, with no label beside it. Green needs no caption, and amber/red have more to say
+        # than a row has room for — the summary is the tooltip, and `⌄` has the whole story.
+        self._health_light = QLabel()
+        self._health_light.setFixedSize(_LIGHT_SIZE, _LIGHT_SIZE)
+        self._set_light(HEALTH_UNKNOWN_COLOR, "아직 확인 전이에요")
 
         self._expand_btn = QPushButton("⌄")
         self._expand_btn.setObjectName("expand")
@@ -158,20 +176,16 @@ class MainWindow(QWidget):
         self._expand_btn.setFixedWidth(_EXPAND_WIDTH)
         self._expand_btn.clicked.connect(self._on_expand)
 
-        # Built by hand rather than with `_card`: that helper adds a title label, and a card whose
-        # title is "" is an empty label silently padding the top of the row.
-        bar = QFrame()
-        bar.setProperty("class", "card")
-        bar.setFrameShape(QFrame.NoFrame)
-        # Fixed height, or the layout gives it the hidden detail panel's stretch and it grows past
-        # its own sizeHint — with the slack landing under the row, not around it.
-        bar.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(12, _BAR_MARGIN, _BAR_MARGIN, _BAR_MARGIN)
-        row.setSpacing(10)
-        row.addWidget(self._status_widget, 1)
-        row.addWidget(self._toggle_btn)
-        row.addWidget(self._health_summary)
+        self._bar = QFrame()
+        self._bar.setProperty("class", "card")
+        self._bar.setFrameShape(QFrame.NoFrame)
+        self._bar.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        row = QHBoxLayout(self._bar)
+        row.setContentsMargins(_BAR_MARGIN, _BAR_MARGIN, _BAR_MARGIN + 4, _BAR_MARGIN)
+        row.setSpacing(12)
+        row.addWidget(self._play_btn)
+        row.addWidget(self._message, 1)
+        row.addWidget(self._health_light)
         row.addWidget(self._expand_btn)
 
         # ---- the detail, hidden until asked for.
@@ -208,8 +222,10 @@ class MainWindow(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 14)
         layout.setSpacing(12)
-        layout.addWidget(bar)
+        layout.addWidget(self._bar)
         layout.addWidget(self._detail, 1)
+
+        self._show_status(BotStatus.STOPPED, "")
 
         # Wire worker signals.
         worker.status_changed.connect(self._on_status_changed)
@@ -223,10 +239,9 @@ class MainWindow(QWidget):
         self._health_timer.timeout.connect(self._worker.request_health)
 
         # Open at the size the content actually wants. `show()` gives a top-level window a default
-        # initial height (100px here) rather than its sizeHint (74), and `adjustSize()` does not
-        # undo it — which left 26px of dead space under the bar on startup, i.e. exactly the
-        # lopsided padding this row was tightened to remove. Deferred for the same reason the
-        # collapse is: the layout has to settle first.
+        # initial height rather than its sizeHint, and `adjustSize()` does not undo it — which left
+        # dead space under the bar on startup. Deferred for the same reason the collapse is: the
+        # layout has to settle first.
         QTimer.singleShot(0, self._shrink_to_fit)
 
     # ------------------------------------------------------------- helpers
@@ -234,20 +249,31 @@ class MainWindow(QWidget):
     def is_expanded(self) -> bool:
         return self._detail.isVisible()
 
+    def _set_light(self, color: str, tooltip: str) -> None:
+        self._health_light.setStyleSheet(
+            f"background-color: {color}; border-radius: {_LIGHT_SIZE // 2}px;"
+        )
+        self._health_light.setToolTip(tooltip)
+
+    def _show_status(self, status: BotStatus, message: str) -> None:
+        """The row's only text. Falls back to the status's tagline when nothing live is happening."""
+        self._message.setText(message or STATUS_TAGLINES[status])
+
     def _set_running_style(self, running: bool) -> None:
         self._running = running
-        self._toggle_btn.setText("■  Stop" if running else "▶  Start")
-        self._toggle_btn.setProperty("running", running)
+        self._play_btn.setText(_STOP_GLYPH if running else _PLAY_GLYPH)
+        self._play_btn.setToolTip("중지" if running else "시작")
+        self._play_btn.setProperty("running", running)
         # Re-polish so the [running] property selector takes effect.
-        self._toggle_btn.style().unpolish(self._toggle_btn)
-        self._toggle_btn.style().polish(self._toggle_btn)
+        self._play_btn.style().unpolish(self._play_btn)
+        self._play_btn.style().polish(self._play_btn)
         if running:
             self._health_timer.start()
         else:
             self._health_timer.stop()
 
-    def _show_health(self, summary: str, detail: str) -> None:
-        """Show the health report: one line always, the probes when expanded.
+    def _show_health(self, overall: str, summary: str, detail: str) -> None:
+        """Show the health report: a light always, the probes when expanded.
 
         The panel's height comes from the text rather than being reserved in advance. It used to be
         a flat 96px — "room for the 4 probe lines" — and increment 5's two extra probes fell off the
@@ -255,7 +281,7 @@ class MainWindow(QWidget):
         a long path silently ate the lines below it. The probe whose whole job is to be read before
         you send a recording was the first to vanish.
         """
-        self._health_summary.setText(summary)
+        self._set_light(HEALTH_COLORS[HealthStatus(overall)], summary)
         label = self._health_label
         label.setText(detail)
         width = label.width() or label.sizeHint().width()
@@ -285,15 +311,15 @@ class MainWindow(QWidget):
             self._worker.request_health()
 
     def _on_status_changed(self, status_value: str, message: str) -> None:
-        self._status_widget.set_status_value(status_value, message)
+        self._show_status(BotStatus(status_value), message)
         # Follow STOPPED too, not just ERROR: the bot can stop itself (e.g. a usage limit halts
-        # it), and leaving the button on "Stop" would force a dead click before Start works.
+        # it), and leaving the button on Stop would force a dead click before Start works.
         if status_value in (BotStatus.ERROR.value, BotStatus.STOPPED.value):
             self._set_running_style(False)
 
     def _on_error(self, message: str) -> None:
         self._append_log(f"⚠️  {message}")
-        self._status_widget.set_status(BotStatus.ERROR, message)
+        self._show_status(BotStatus.ERROR, message)
         self._set_running_style(False)
 
     def _append_log(self, line: str) -> None:

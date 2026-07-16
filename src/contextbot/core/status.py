@@ -19,7 +19,10 @@ class BotStatus(str, Enum):
     ERROR = "error"
 
 
-# Color hint per status, consumed by the UI status widget.
+# Colour and label hints per status. **Nothing renders these today** — the window shows the tagline
+# and nothing else, and its one light is the *health* report's, not this. They are the model's
+# vocabulary rather than dead UI: a tray icon or a second surface would want them, and they cost a
+# dict. (The status emoji that lived here went with the face it drew.)
 STATUS_COLORS: dict[BotStatus, str] = {
     BotStatus.STOPPED: "#9e9e9e",     # gray
     BotStatus.STARTING: "#f5a623",    # amber
@@ -34,15 +37,6 @@ STATUS_LABELS: dict[BotStatus, str] = {
     BotStatus.RUNNING: "Running",
     BotStatus.PROCESSING: "Processing…",
     BotStatus.ERROR: "Error",
-}
-
-# Friendly emoji per status, shown in the UI status "face".
-STATUS_EMOJI: dict[BotStatus, str] = {
-    BotStatus.STOPPED: "😴",
-    BotStatus.STARTING: "🔌",
-    BotStatus.RUNNING: "🤖",
-    BotStatus.PROCESSING: "✍️",
-    BotStatus.ERROR: "🚨",
 }
 
 # A short, friendly one-liner per status (used when no live message is present).

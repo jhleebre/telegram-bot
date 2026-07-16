@@ -15,15 +15,17 @@ from PySide6.QtCore import QThread, Signal
 
 from ..config import Settings
 from ..core.client_service import ClientService
+from ..core.health import HealthStatus
 from ..core.status import BotStatus, StatusModel
 
 
 class BotWorker(QThread):
     status_changed = Signal(str, str)   # BotStatus value, message
     log_line = Signal(str)
-    # (summary, detail): the collapsed window shows only the summary, so the report has to
-    # arrive already reduced to one line — the UI must not re-derive it from the detail text.
-    health_ready = Signal(str, str)
+    # (overall, summary, detail). The collapsed window shows only a coloured light, so the state
+    # travels as a value rather than the UI sniffing an emoji out of the summary it was handed.
+    # The summary is the light's tooltip; the detail is what expanding shows.
+    health_ready = Signal(str, str, str)
     error = Signal(str)
 
     def __init__(self, settings: Settings):
@@ -61,9 +63,11 @@ class BotWorker(QThread):
             try:
                 report = f.result()
             except Exception as exc:  # noqa: BLE001
-                self.health_ready.emit("🔴 확인 실패", f"health check failed: {exc}")
+                self.health_ready.emit(
+                    HealthStatus.ERROR.value, "🔴 확인 실패", f"health check failed: {exc}"
+                )
                 return
-            self.health_ready.emit(report.summary(), report.as_text())
+            self.health_ready.emit(report.overall.value, report.summary(), report.as_text())
 
         fut.add_done_callback(_done)
 

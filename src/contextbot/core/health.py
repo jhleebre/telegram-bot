@@ -24,6 +24,16 @@ _ICONS = {
     HealthStatus.ERROR: "🔴",
 }
 
+# Colour hint per state, for the UI's indicator light. Here rather than in the UI for the same
+# reason :func:`HealthReport.summary` is: it is a fact about the report, and it stays testable.
+HEALTH_COLORS = {
+    HealthStatus.HEALTHY: "#2ecc71",   # green
+    HealthStatus.DEGRADED: "#f5a623",  # amber
+    HealthStatus.ERROR: "#e74c3c",     # red
+}
+# Before the first check has run there is nothing to report — not even "fine".
+HEALTH_UNKNOWN_COLOR = "#c9cee0"
+
 
 @dataclass
 class ProbeResult:
