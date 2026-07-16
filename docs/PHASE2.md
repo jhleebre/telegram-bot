@@ -1,4 +1,4 @@
-# Phase 2 — Development Plan (increments 1–4 of 5 shipped)
+# Phase 2 — Development Plan (all 5 increments shipped)
 
 Phase 2 adds the LLM/VLM-powered pipelines on top of the Phase 1 skeleton. The engine is
 **Claude Code in headless mode** (`claude -p`), and multi-turn human-in-the-loop review is built
@@ -9,12 +9,24 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > *Increment 1 (as built)* (the engine's contract and the three real-world bugs it hit) →
 > *Increment 2 (as built)* (the file pipelines and the isolation the PDF route depends on) →
 > *Increment 3 (as built)* (images, and the format finding that route turns on) →
-> *Usage-limit policy* (binding on every later increment) → *Writing Markdown: ranges take a
-> hyphen* (binding on every prompt) → *The resume contract* (measured; it rules out the staging
-> pattern increments 2–3 use) → *Increment 4 (as built)* (the review state machine increment 5
-> builds on, and the rules that hold it together) → *Next up: increment 5* (**start with its
-> removal boundary** — increment 5 both deletes `#검토` and replaces it as the review's producer).
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **474 passing**, no network or model runs.
+> *Usage-limit policy* (binding on every pipeline) → *Writing Markdown: ranges take a hyphen*
+> (binding on every prompt) → *The resume contract* (measured; it rules out the staging pattern
+> increments 2–3 use) → *Increment 4 (as built)* (the review state machine) → *The decisions,
+> settled* → *Increment 5 (as built)* (audio, the queue, and the two silent bugs only real runs
+> found).
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **573 passing**, no network or model runs.
+>
+> **Phase 2 is complete.** Every pipeline in *Scope* is shipped and owner-verified. The one thing
+> deliberately left open is **open decision 6** (should the bot DM answer when nobody asked it
+> anything — and should a plain message there *start* something). Increment 5 deleted `#검토`, so
+> **text has no interactive path today**: a Saved Messages memo is always a quick note, which is the
+> owner's stated model. That was a decision, not a side effect — see the decision itself.
+>
+> **Three lessons, one shape, four increments.** *Read the consumer's source; the model would rather
+> answer than admit it cannot see; the review loop's failures are silent.* Increment 5 hit all three
+> again: the vault (not this doc) knew the note type, `mlx_whisper`'s source (not its docs) knew
+> about the network call and the hardcoded `ffmpeg`, and both of its own bugs were silent. Assume a
+> sixth increment would meet them a fifth time.
 
 **Ingestion recap (from the Phase 1 hybrid):** input files arrive via **Saved Messages** (Telethon)
 and are downloaded to a temp dir with `message.download_media(...)`. The **review conversation runs
@@ -49,8 +61,10 @@ Recommended order (each is a self-contained milestone — ship and verify before
       (`#검토 <memo>`) rather than wired into audio. **Shipped and owner-verified** — see
       "Increment 4 (as built)". The `#검토` route is **scaffolding that increment 5 deletes**, as
       its last step; the removal boundary is written out in the increment 5 handoff.
-- [ ] **5. Audio → meeting note** (`audio_handler`, `mlx-whisper`, glossary, review) — the most
-      complex; depends on 1 and 4. **Next up** — the handoff is "Next up: increment 5" below.
+- [x] **5. Audio → meeting note** (`audio_handler`, `mlx-whisper`, glossary, review) — the most
+      complex; depends on 1 and 4. **Shipped** — see "Increment 5 (as built)" below. It also
+      **deleted the `#검토` scaffolding** as its last step, so audio is now the review loop's only
+      producer.
 
 Rationale: features 2–3 are one-shot and low-risk, so they validate the engine (1) before the
 harder two-way review flow (4) and the STT-heavy audio pipeline (5) are attempted.
@@ -246,14 +260,14 @@ document's own title, `##`/`###` structure, and rendered tables, faithfully.
 
 | Input | Output | Original file |
 |-------|--------|---------------|
-| Audio (m4a/wav/mp3/voice) | Meeting note (glossary-corrected, reviewed) → `0_inbox` | deleted after success |
+| **Audio** (m4a/wav/mp3/voice) | ✅ **shipped (increment 5)** — local Whisper → glossary-corrected, reviewed meeting note (`type: meeting-note`) → `0_inbox`. A second recording is **queued**, not bounced | **deleted when the review ends** — it lives in the review's tree, so nothing has to remember |
 | **Image** (screen capture/photo) | ✅ **shipped** — description + OCR note → `0_inbox` | **encoded into the note itself** (base64; heic→jpeg, bmp→png first) — no separate file |
 | **PDF** | ✅ **shipped** — Markdown (Claude reads the PDF natively) → `0_inbox` | **moved to `~/Downloads/`** |
 | docx / pptx / xlsx / … | ✅ **shipped** — **out of scope by decision**: reply asking for a PDF export | — |
 | txt / csv | ✅ **shipped** — Markdown note (csv → table, rendered deterministically) → `0_inbox` | **moved to `~/Downloads/`** |
 | Markdown (`.md`) | ✅ **shipped** — saved as-is → `0_inbox` | is the note |
 | Text (upgrade) | ✅ **shipped** — LLM-enriched title/tags/summary (fallback = Phase 1 path) | — |
-| **Text `#검토 …`** | ✅ **shipped (increment 4)** — drafted, reviewed over bot DM, then → `0_inbox`. The review loop's proving ground; opt-in, so a plain memo is unaffected | — |
+| ~~**Text `#검토 …`**~~ | ⛔ **deleted (increment 5)** — it was the review loop's proving ground and nothing more. Audio is the producer now, and a magic prefix in the *capture* channel made "throw it in and it becomes a note" conditional. See *Increment 5 (as built)* | — |
 
 ## New modules
 
@@ -263,27 +277,32 @@ src/contextbot/
 │   ├── claude_cli.py       # wrapper over `claude -p` (async subprocess, JSON parse, resolution)
 │   ├── parsing.py          # recover a JSON object from a model's free-text reply
 │   └── prompts/            # text_enrich ✅ / pdf_to_markdown ✅ / image_describe ✅
-│                           # review_draft ✅ / review_revise ✅ (increment 4) / meeting
+│                           # review_revise ✅ (4) / meeting_note ✅ meeting_glossary ✅ (5)
+│                           # (review_draft.md deleted with the #검토 scaffolding)
 ├── core/
-│   ├── session_store.py    # ✅ increment 4 — the pending review: draft, resume handle, work dir
+│   ├── session_store.py    # ✅ increment 4 — the review: draft, resume handle, work dir
+│   │                       #    ✅ increment 5 — + the queue (QUEUED), note_type, tags
 │   └── review_poller.py    # ✅ increment 4 — bot-DM getUpdates, only while a review is open
 ├── handlers/
-│   ├── audio_handler.py    # (fill in) audio → meeting note — increment 5's producer
+│   ├── audio_handler.py    # ✅ increment 5 — audio → meeting note; the review loop's producer
 │   ├── image_handler.py    # ✅ built in increment 3 — image → described note
 │   ├── document_handler.py # ✅ built in increment 2 — md / txt / csv / pdf / unsupported
-│   ├── downloads.py        # ✅ built in increment 3 — shared attachment download (audio is next)
-│   └── conversation.py     # ✅ increment 4 — the whole review lifecycle: start, reply, end
-│                           #    (increment 5 deletes its `#검토` scaffolding — see the handoff)
-├── stt/                    # (increment 5) — ported from meeting-transcriber, not imported from it
-│   └── whisper.py          # transcribe() + model-presence check; ffmpeg resolved, not assumed
+│   ├── downloads.py        # ✅ built in increment 3 — shared attachment download (audio is 3rd)
+│   └── conversation.py     # ✅ increment 4 — the whole review lifecycle: reply, revise, end
+│                           #    ✅ increment 5 — + activate/promote_next, and accept's side effects
+├── stt/                    # ✅ increment 5 — ported from meeting-transcriber, not imported from it
+│   └── whisper.py          # transcribe() + model presence; ffmpeg put on PATH, not just resolved
 └── files/                  # ✅ built in increments 2–3
     ├── originals.py        # original-file policy (Downloads / delete / keep-and-embed)
     ├── images.py           # ✅ increment 3 — heic/bmp → PNG, so the model actually *sees* it
+    ├── glossary.py         # ✅ increment 5 — read/append the vault's term table (never commits)
     └── text_files.py       # encoding detection + deterministic CSV → Markdown table
 ```
 
-*(`stt/` is a suggestion, not a decision — increment 5 places it. The point it encodes: the STT
-code is **ported in**, so the bot never depends on `~/Projects/meeting-transcriber/` at runtime.)*
+*(`stt/` was a suggestion and increment 5 kept it. The point it encodes held: the STT code is
+**ported in**, so the bot never depends on `~/Projects/meeting-transcriber/` at runtime. The
+glossary is the one genuine cross-project file, and it moved into the **vault** rather than staying
+there — see *The decisions, settled* → 4.)*
 
 Additional runtime deps: `mlx-whisper` (STT, Apple Silicon) — **and nothing else**. Documents need
 no converter library and no LibreOffice: the scope is PDF-only and Claude Code reads PDFs natively
@@ -570,6 +589,11 @@ IDLE ──job needs review──▶ AWAITING_REVIEW ──owner reply (bot DM)�
   contract under *Next up: increment 4*.
 
 ## A. Audio → meeting note (reuse `meeting-transcriber`)
+
+> ✅ **Shipped in increment 5** — this is the sketch that went in; *Increment 5 (as built)* is what
+> came out and is the authority where they differ. Notably: the audio is staged **outside** the work
+> dir (the model cannot hear it, and a file it would `Read` into raw bytes is the `.heic` trap), the
+> glossary lives in the **vault** rather than meeting-transcriber, and the note is `meeting-note`.
 
 1. Download the audio to `.tmp/` via `message.download_media(...)` (Telethon); run local
    `mlx-whisper` `whisper-large-v3-turbo` (port of
@@ -1036,16 +1060,27 @@ raised, nothing logged, the suite stayed green — a mangled memo, an undelivera
 permanently wedged review, an impatient "얼마나 걸려?" applied as a correction. A review loop's
 failures are quiet by construction, because the only witness is a person reading a DM.
 
-### Next up: increment 5 — audio → meeting note
+### The increment 5 handoff (kept — it is the *why*, and every prediction in it is now settled)
 
-**Status: not started.** It is the last one, the most complex, and the only one that depends on two
-prior increments (1 and 4).
+> ✅ **Shipped.** This was the handoff written before the work; **Increment 5 (as built)** below is
+> what came of it and is the authority where they differ. It is kept in full rather than trimmed,
+> because it is the record of what was known in advance — and it earned that: the STT dependency
+> table, the removal boundary, and all five decisions it posed held exactly as framed. Two of its
+> incidental claims did not survive contact (`type: meeting`, and staging the audio in the work
+> dir); both are corrected in *as built*, and both were caught by reading the source rather than by
+> a test.
 
 Scope: `handlers/audio_handler.py`, `mlx-whisper` STT, the shared glossary, and the review loop —
 see *A. Audio → meeting note* above for the pipeline, and *Increment 4 (as built)* for the state
 machine it plugs into.
 
 #### First: delete the `#검토` scaffolding — **as increment 5's last step, not its first**
+
+> ✅ **Done, and last, exactly as argued.** The boundary table below was followed symbol by
+> symbol, and both reasons for the ordering paid: `#검토` was the control group that answered
+> "my code or the plumbing?" while the audio pipeline was driven for real, and deleting it
+> first would have left increment 4 unreachable from the app. Its tests went with it, which is
+> why the suite drops from 601 to 573.
 
 **`#검토` is scaffolding, and increment 5 is where it dies.** It exists only because the state
 machine had to be built and verified before audio existed (the delivery approach's advice). It is
@@ -1104,6 +1139,12 @@ mechanical delete rather than an archaeology exercise:
   effect **after the last LLM call** of the last turn, which is the one place the rule still holds.
 
 #### The STT dependency — measured, and the trap is that it looks fine on this machine
+
+> ✅ **All of this held**, and the trap was real: the model is cached here, so nothing in
+> development could have failed. Two corrections from reading `mlx_whisper`'s source (both in
+> *as built*): a *cached* model still hits the network unless you pass the resolved snapshot
+> **directory**, and `ffmpeg` cannot be handed a path at all — it must go on `PATH`. One stale
+> figure below: the package in meeting-transcriber's venv is v0.4.3, not v0.1.0.
 
 `~/Projects/meeting-transcriber/` is the reference implementation: **read it, and lift what you
 need.** Measured on this machine (2026-07-16):
@@ -1166,6 +1207,8 @@ completeness):
 
 **The decisions increment 5 has to make (each one is genuinely open):**
 
+> ✅ **All settled before any code was written — see *The decisions, settled* below.**
+
 1. **One review at a time is going to hurt here, and this is where it gets designed.** A `#검토`
    memo bouncing off "먼저 끝내주세요" costs a re-send. **An audio file bouncing off it costs a
    re-upload of a large recording, and the whole Whisper run.** The constraint exists because a bare
@@ -1186,6 +1229,113 @@ completeness):
 
 **Verification bar (same as increments 2–4):** unit tests with a mocked engine and mocked STT (no
 model runs, no model downloads, no network), the whole suite green, then a real-app run.
+
+### Increment 5 (as built) — audio → meeting note
+
+Delivered: `stt/whisper.py` (the port) + `scripts/download_model.py`, `files/glossary.py`,
+`handlers/audio_handler.py` (the producer), `engine/prompts/meeting_note.md` +
+`meeting_glossary.md`, the queue in `core/session_store.py` (`ReviewState.QUEUED`, `note_type`,
+`tags`), `conversation.activate` / `promote_next` / `_accept`, the `whisper-stt` and `glossary`
+health probes, five settings, and the **deletion of the `#검토` scaffolding**. Suite: 474 → **573**
+(the count *drops* against the peak of 601 because the scaffolding's tests went with it).
+
+**The decisions above all held.** What follows is what building it changed or found.
+
+#### Two things the vault knew and this document did not
+
+1. **`type: meeting-note`, not `type: meeting`.** The handoff above says a meeting note wants
+   `type: meeting`. The vault has **35 notes with `type: meeting-note` and zero with `meeting`** —
+   it was written from memory, and following it would have filed every meeting note into a category
+   of one, invisible to whatever the owner filters on. **Nothing would have failed**: the note lands
+   with the wrong `type:` and only a reader who looks ever notices. This is increment 3's
+   `.metadata.json` lesson repeating exactly — *read the consumer's source* — and the third time in
+   Phase 2 that reading it beat guessing.
+2. **The section headings really are English** (`## Overview` / `## Summary` / `## Discussion
+   Points`), Korean content underneath, confirming `SKILL.md`'s template against real notes.
+
+#### The audio does **not** go in the work dir (a deviation from the handoff)
+
+The handoff says "stage the audio and the transcript in `review.work_dir`, alone". Only the
+transcript does. `work_dir` is the model's entire view of the filesystem, and the model **cannot
+hear** — an `.m4a` sitting there is a file `Read` hands back as raw bytes, which is precisely
+increment 3's `.heic` trap (describe the header, report success). It lives in `review.audio_dir`
+(`state/reviews/<id>/audio/`) instead: inside the review's tree, beside the draft, outside the cwd.
+Same lifetime, none of the exposure.
+
+#### `mlx_whisper`'s two contracts, read off its source rather than assumed
+
+- **A cached model still hits the network.** `load_model` only skips `snapshot_download` when
+  `Path(path_or_hf_repo).exists()` — and `snapshot_download` phones HuggingFace to resolve `main`
+  **even when the model is fully cached** (measured: three requests to huggingface.co on a cached
+  transcription). So `model_is_cached()` passing and then passing the *repo id* anyway would have
+  left exactly the offline failure the check exists to prevent. `transcribe` passes the **resolved
+  snapshot directory**, which takes that branch out entirely: no round-trip, and it transcribes
+  under `HF_HUB_OFFLINE=1`. It also halved wall time on a short clip (9.6s → 4.4s).
+- **`ffmpeg` cannot be handed a path.** `mlx_whisper.audio.load_audio` builds its command as the
+  bare string `["ffmpeg", "-nostdin", …]`. So the increment-1 lesson ("resolve it, don't assume
+  PATH") is *necessary but not sufficient* here: the resolved directory has to be **prepended to
+  `PATH`** before `mlx_whisper` shells out, or a Dock-launched app cannot decode audio at all.
+
+#### Two bugs only the real runs found — both silent, as increment 4 predicted
+
+The handoff's warning ("increment 4's four bugs were all silent failures") landed. Both of these
+save a note, raise nothing, and leave the suite green.
+
+1. **A preamble before the `제목:` line.** `parse_draft` looks for the title on the **first** line.
+   The first real run obeyed "no preamble"; the second opened with `글로시리 확인이 완료됐습니다. …`
+   and a `---`. That one slip cost everything at once: the title fell back to the filename
+   (`meeting`), the tags came out empty, and the preamble *plus the raw `제목:`/`태그:` lines* were
+   saved as the note's body. **A flaky instruction needs a structural fix** (increment 2's PDF
+   lesson): the template now says the reply's first characters are `제목:` *and* explains why (it is
+   parsed, not read), and `strip_preamble` — inside `parse_draft`, bounded to 8 lines so a `제목:`
+   deep in a real body cannot eat the note above it — makes the parsing stop depending on it.
+2. **A trailing `---`.** The model put a rule between the note and the questions heading;
+   `parse_draft` splits on the heading, so it stayed in the body and the note ended in a dangling
+   `<hr>`. `strip_trailing_rule` handles it.
+
+Both live in the **shared** path, so the revise turn gets them too — which matters more than it
+looks: the real correction run proved the revise turn *does* re-emit the `태그:` line that
+`split_tags` exists to catch. Had that been producer-only, the first correction to any meeting note
+would have written `태그: …` into the note body.
+
+#### Points worth knowing before touching this
+
+- **`store.update` no longer overwrites the list.** It was `data["reviews"] = [review]`, which was
+  correct while exactly one review could exist and is a silent eraser with a queue: saving the
+  active review would drop every queued one. `_put` replaces by `message_id`.
+- **`create()` always makes a review `QUEUED`**, and the producer activates it once a draft exists.
+  Not bookkeeping: a review created answerable is visible to `pending()` for the whole drafting turn
+  — *minutes* for audio — so a reply arriving meanwhile would be routed into a review with no draft.
+- **Promotion is wired at every place a review can end** (a reply, the expiry tick, startup), and
+  **before `_on_review_reply` returns** — the poll loop re-checks `is_active` the moment it does.
+  Forgetting one leaves a finished draft nobody is ever asked about, and nothing polls for a review
+  nobody has been asked about. Startup needs it too: if the review ahead of a queued one ended just
+  before the app closed, no other trigger exists.
+- **The transcript cache is `state/audio/<message_id>/`** and the deferral path is the *only* one
+  that does not delete it. Keyed by message id because Telegram media is immutable.
+- **`_accept` is the one place a side effect follows an LLM call at the *end* of a review** rather
+  than the start of a job. Order: glossary turn → note → glossary append → `store.remove` (which
+  takes the audio). A failed glossary turn **still writes the note**: they said 확인.
+- **A non-meeting review makes no glossary call**, and the branch is not dead weight — it is what
+  open decision 6's producer (a text review started from the bot DM) will need.
+
+**Verification status.** Driven for real, end-to-end through `handle_audio` and `handle_reply`
+against the real `claude` binary and real `mlx-whisper`, on a synthesized Korean recording:
+
+- **The glossary substitution works, and it is the point of the whole feature.** Whisper heard 티맵
+  as **"팀웹"** — a plausible Korean word that is not the product's name, in a sentence that reads
+  perfectly. The glossary's row 3 already carries `팀앱, 팀웨이, 팀웹 → T-map`; the note says T-map
+  throughout and the model **did not ask about it**, because it is settled. It flagged
+  「맞고」→「맡고」 instead — a second real STT error nobody planted.
+- **The full loop**: draft (title + tags + 4 timestamped questions) → a correction (`김철수가 아니라
+  김철승 책임입니다`) → applied throughout, tags updated → `확인` → note written with
+  `type: meeting-note`, `reviewed: true`, and the glossary grew
+  `| 김철수 | 김철승 | 인명 | SKT 책임 |` — **keyed on the wrong spelling, valued at the corrected
+  one**, inserted inside the table. The audio and the review tree are gone.
+- **The isolation was asserted as the model saw it**: `work_dir` listing = `['transcript.txt']`.
+- The tilde rule survived (`10-20%`), as it did in increment 4.
+
+*(The probe appends to a **copy** of the glossary; the owner's real file was never touched.)*
 
 #### The decisions, settled — recorded before any code was written
 
@@ -1348,6 +1498,16 @@ Still open (each is confirmed when its increment starts):
    fine — the owner's stated model is that Saved Messages text is *always* a quick note — but it
    should be a decision, not a side effect.
 
+   **Status after increment 5: the trap was walked into deliberately, and this is now the only open
+   item in Phase 2.** `#검토` is gone and this was not built, so **text has no interactive path
+   today** — a Saved Messages memo is always a one-shot note, exactly the owner's stated model. Two
+   things increment 5 leaves for whoever picks this up: the review loop no longer has *any* memo
+   producer, so a bot-DM-started text review would be a genuinely new one (`handle_audio` is the
+   pattern — pin the id, `store.create` before the call, `activate` when the draft exists); and
+   `_accept`'s glossary branch already keys on `note_type`, so a non-meeting review correctly files
+   nothing (`test_a_non_meeting_review_makes_no_glossary_call` pins it). The queue and `promote_next`
+   are media-agnostic and would need nothing.
+
 ### Cost note — the budget is plan usage, not dollars
 
 A `claude -p` call carries ~9–14k cache-creation tokens (agent system prompt + tool definitions)
@@ -1374,7 +1534,7 @@ first lever.
 Mock `engine/claude_cli.py` and the STT step so the conversation state machine, session
 resume/finalize, glossary update, original-file moves, and file output are all testable without
 real model runs, model downloads, or network. Add fixtures for pending-session persistence and
-timeout/`취소` handling.
+timeout/`취소` handling. *(Held, all five increments.)*
 
 Increment 4 adds `test_conversation.py` (the state machine: the draft turn, the resume turn, accept
 / cancel / revise, and **every failure edge** — a usage limit on turn 1 deferring *and leaving no
@@ -1387,3 +1547,18 @@ against the fake-CLI subprocess, the two review templates in `test_prompts.py` (
 rule, which is parametrized per template so a new one cannot forget it), the prefix dispatch in
 `test_router.py`, and the poller lifecycle + the HWM-advances-on-review rule in
 `test_client_service.py`. Suite: 341 → **474**.
+
+Increment 5 adds `test_stt.py` (the model-presence check incl. **a half-finished download**, the
+resolved-directory-not-repo-id rule that keeps transcription offline, ffmpeg onto PATH, and every
+`TranscriptionError`), `test_glossary.py` (parsing the table, appending only what is new, and never
+corrupting it — pipes, dupes, and landing *inside* the table rather than at EOF), and
+`test_audio_handler.py` (the happy path, the isolation asserted **as the model saw it**, the
+transcript cache proving Whisper runs once across a deferral and its replay, every degradation
+landing on a transcript note, and the queue). `test_conversation.py` gains the queue, `split_tags`,
+`strip_preamble`/`strip_trailing_rule` (both from real runs), and what accepting a meeting now
+means; `test_client_service.py` the promotion wiring; `test_health.py` the `whisper-stt` and
+`glossary` probes. **`mlx_whisper` is faked at the import site and `conftest.fake_stt` is required
+by any test that routes audio** — without it a test that merely proves *dispatch* would load 1.5GB
+of weights, and the `whisper-stt` probe is pinned so a green suite never means "the owner happens to
+have the model on disk". Suite: 474 → 601, then **573** once the `#검토` tests were deleted with
+their subject.

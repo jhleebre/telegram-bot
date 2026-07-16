@@ -100,22 +100,21 @@ async def test_route_markdown_saves_the_file(settings):
     assert result.saved_path.read_text(encoding="utf-8") == "# routed"
 
 
-async def test_route_sends_a_review_prefixed_memo_to_the_review_loop(settings):
-    """`#검토` is the one route a message *kind* cannot decide, so route() checks it."""
-    msg = build_incoming_message(text_message(24, "#검토 인프라 예산 회의 메모"))
-    result = await route(msg, settings)  # claude_enabled=False → plain note + the reason
+async def test_every_route_is_decided_by_the_message_kind_alone(settings):
+    """Increment 4 had one exception — a `#검토` prefix diverting a memo into the review loop —
+    and increment 5 deleted it with the rest of that scaffolding.
 
-    assert "검토 없이 저장했습니다" in result.reply
-    assert result.saved_path is not None
+    A memo that *looks* like the old trigger is now just a memo, which is the whole point: Saved
+    Messages means "throw it in and it becomes a note", and a magic prefix made that conditional.
+    That conditionality is what produced the `#검토된 사항` mangling bug in the first place.
+    """
+    for text in ("#검토 인프라 예산 회의 메모", "#검토된 사항 정리하기", "그냥 메모"):
+        msg = build_incoming_message(text_message(24, text))
 
+        result = await route(msg, settings)
 
-async def test_route_leaves_a_plain_memo_on_the_one_shot_path(settings):
-    """The review route is opt-in: an ordinary memo must be untouched by increment 4."""
-    msg = build_incoming_message(text_message(25, "그냥 메모"))
-    result = await route(msg, settings)
-
-    assert "검토" not in result.reply
-    assert result.saved_path.read_text(encoding="utf-8").strip().endswith("그냥 메모")
+        assert result.saved_path is not None
+        assert result.saved_path.read_text(encoding="utf-8").strip().endswith(text)
 
 
 async def test_route_unsupported_document_asks_for_a_pdf(settings):

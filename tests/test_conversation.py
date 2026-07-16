@@ -21,15 +21,12 @@ from contextbot.engine.claude_cli import (
     ClaudeTimeout,
     ClaudeUsageLimit,
 )
-from contextbot.handlers.base import DeferMessage, IncomingMessage, MessageKind
 from contextbot.handlers.conversation import (
     QUESTIONS_HEADING,
     activate,
     discard_incomplete,
     expire_stale,
     handle_reply,
-    handle_review_request,
-    is_review_request,
     parse_draft,
     promote_next,
     review_block,
@@ -80,13 +77,6 @@ class FakeEngine:
         return turn
 
 
-def memo(text: str = "#검토 인프라 예산 회의 메모", **kw) -> IncomingMessage:
-    return IncomingMessage(
-        user_id=1, chat_id=1, message_id=kw.pop("message_id", 7), date=DATE,
-        kind=MessageKind.TEXT, text=text, **kw
-    )
-
-
 @pytest.fixture
 def store(tmp_path) -> SessionStore:
     return SessionStore(tmp_path / "reviews")
@@ -106,51 +96,6 @@ def note_data(settings) -> tuple[dict, str]:
     text = notes(settings)[0].read_text(encoding="utf-8")
     _, fm, body = text.split("---", 2)
     return yaml.safe_load(fm), body.strip()
-
-
-# ------------------------------------------------------------------- the trigger
-@pytest.mark.parametrize(
-    "text, expected",
-    [
-        ("#검토 회의 메모", True),
-        ("  #검토 회의 메모", True),
-        ("#검토\n회의 메모", True),  # a newline is a word boundary too
-        ("#검토", True),  # the trigger alone → "검토할 내용이 없습니다"
-        ("회의 메모", False),
-        ("메모에 #검토 라고 적었다", False),  # only a *prefix* opts in
-        ("", False),
-        # The prefix must be a whole word. `#검토된 사항` is a memo *about* something reviewed —
-        # and a bare startswith would also have handed the model `된 사항`, drafting a note from
-        # mangled text.
-        ("#검토된 사항 정리하기", False),
-        ("#검토사항 정리", False),
-        # A Markdown H1 has a space after the hash, so it was never a trigger.
-        ("# 검토 회의", False),
-    ],
-)
-def test_is_review_request(text, expected):
-    assert is_review_request(text) is expected
-
-
-async def test_a_memo_starting_with_a_similar_word_is_not_mangled(settings, store):
-    """The failure the word-boundary check prevents: diverted *and* silently truncated."""
-    from contextbot.core.router import route
-
-    result = await route(memo("#검토된 사항 정리하기"), settings)
-
-    assert store.has_pending() is False
-    assert result.saved_path.read_text(encoding="utf-8").strip().endswith("#검토된 사항 정리하기")
-
-
-async def test_a_plain_memo_never_enters_the_review_loop(live, store):
-    """The route is opt-in: the shipped one-shot path must be untouched by this increment."""
-    from contextbot.core.router import route
-
-    engine = FakeEngine()
-    await route(memo("그냥 메모입니다"), replace(live, claude_enabled=False))
-
-    assert engine.calls == []
-    assert store.has_pending() is False
 
 
 # ----------------------------------------------------------------------- parsing
@@ -221,158 +166,6 @@ def test_review_block_hides_an_empty_question_list(store):
     review.write_draft("본문")
     review.questions = "- (없음)"
     assert "(없음)" not in review_block(review)
-
-
-# ------------------------------------------------------------------ starting one
-async def test_a_review_request_drafts_and_asks(live, store):
-    engine = FakeEngine(ClaudeResult(text=DRAFT))
-    result = await handle_review_request(memo(), live, engine=engine, store=store)
-
-    assert "담당자를 누구로 할까요?" in result.reply
-    assert "확인" in result.reply and "취소" in result.reply
-    # Nothing is written yet: a draft is not a note until the owner accepts it.
-    assert result.saved_path is None
-    assert notes(live) == []
-
-    review = store.pending()
-    assert review.title == "3분기 인프라 예산 회의"
-    assert review.state is ReviewState.AWAITING_REVIEW
-
-
-async def test_the_session_id_is_pinned_before_the_call(live, store):
-    """Row 6 of the resume contract, and the reason it matters: the store records a resumable
-    handle *before* the call that creates the session, so a crash mid-call leaves something to
-    resume rather than an orphan."""
-    engine = FakeEngine(ClaudeResult(text=DRAFT))
-    await handle_review_request(memo(), live, engine=engine, store=store)
-
-    pinned = engine.calls[0]["session_id"]
-    assert pinned and store.pending().session_id == pinned
-    assert engine.calls[0].get("resume") is None
-
-
-async def test_the_job_runs_in_the_reviews_stable_dir_not_a_temp_one(live, store):
-    """The whole increment turns on this. A session is keyed by its cwd path, so the pattern
-    increments 2-3 use (TemporaryDirectory, deleted when the handler returns) would kill the
-    session before the owner had read the question."""
-    engine = FakeEngine(ClaudeResult(text=DRAFT))
-    await handle_review_request(memo(), live, engine=engine, store=store)
-
-    cwd = engine.calls[0]["cwd"]
-    assert cwd == store.pending().work_dir
-    assert engine.calls[0]["add_dirs"] == [cwd]
-    # And it is still there after the handler returned — the point of the exercise.
-    assert Path(cwd).is_dir()
-
-
-async def test_the_review_clock_starts_when_the_owner_is_asked(live, store):
-    """created_at gates the poller's backlog filter, so it must mean "the earliest moment this
-    could have been answered" — i.e. when the question went out, not when drafting began.
-
-    Those are a whole turn apart: ~60s for a memo, and *minutes* for audio once Whisper is in the
-    path. Anything the owner types at the bot while it is drafting predates the question and cannot
-    be an answer to it — but stamped before the call, it sails through the filter and is applied as
-    a correction, burning an LLM turn revising the note against "얼마나 걸려?".
-    """
-    drafted_at: datetime | None = None
-
-    class SlowEngine:
-        calls: list = []
-
-        async def run(self, prompt, **kwargs):
-            nonlocal drafted_at
-            await asyncio.sleep(0.02)  # the draft turn takes real time
-            drafted_at = datetime.now(timezone.utc)
-            return ClaudeResult(text=DRAFT)
-
-    await handle_review_request(memo(), live, engine=SlowEngine(), store=store)
-
-    assert store.pending().created_at >= drafted_at
-
-
-async def test_only_one_review_at_a_time(live, store):
-    """Two open reviews make a bare "확인" unattributable. Reply and advance rather than defer:
-    deferring halts the bot, which stops the poller and leaves the open review unanswerable."""
-    engine = FakeEngine(ClaudeResult(text=DRAFT), ClaudeResult(text=DRAFT))
-    await handle_review_request(memo(message_id=7), live, engine=engine, store=store)
-
-    result = await handle_review_request(memo(message_id=8), live, engine=engine, store=store)
-
-    assert "이미 검토 중" in result.reply
-    assert store.pending().message_id == 7  # the first review is untouched
-    assert len(engine.calls) == 1
-
-
-async def test_an_empty_memo_asks_for_content(live, store):
-    result = await handle_review_request(memo("#검토"), live, engine=FakeEngine(), store=store)
-    assert "검토할 내용이 없습니다" in result.reply
-    assert store.has_pending() is False
-
-
-async def test_engine_off_saves_a_plain_note_rather_than_losing_the_memo(settings, store):
-    """No engine means no draft, and a review of nothing is nothing. The capture is the point."""
-    result = await handle_review_request(memo(), settings, store=store)
-
-    assert result.saved_path is not None
-    assert "CLAUDE_ENABLED=false" in result.reply
-    assert store.has_pending() is False
-    _, body = note_data(settings)
-    assert body == "인프라 예산 회의 메모"
-
-
-async def test_a_failed_first_draft_still_saves_the_memo(live, store):
-    engine = FakeEngine(ClaudeTimeout("too slow"))
-    result = await handle_review_request(memo(), live, engine=engine, store=store)
-
-    assert result.saved_path is not None
-    assert "검토 없이 저장했습니다" in result.reply
-    assert store.has_pending() is False
-
-
-async def test_the_sentinel_falls_back_to_a_plain_note(live, store):
-    engine = FakeEngine(ClaudeResult(text="DRAFT_FAILED"))
-    result = await handle_review_request(memo(), live, engine=engine, store=store)
-    assert result.saved_path is not None
-    assert store.has_pending() is False
-
-
-async def test_a_memo_containing_the_sentinel_still_drafts(live, store):
-    """The sentinel is matched on the first line, not by substring — the same guard the PDF and
-    image routes need, for the same reason."""
-    body = f"제목: 에러 코드 정리\n\nDRAFT_FAILED 는 초안 실패를 뜻한다.\n\n{QUESTIONS_HEADING}\n\n- (없음)"
-    engine = FakeEngine(ClaudeResult(text=body))
-    await handle_review_request(memo(), live, engine=engine, store=store)
-    assert store.has_pending() is True
-
-
-# -------------------------------------------------------------- the usage limit
-async def test_a_usage_limit_on_turn_1_defers(live, store):
-    """Turn 1 *is* a capture, so the usage-limit policy applies here in full."""
-    engine = FakeEngine(ClaudeUsageLimit("429"))
-    with pytest.raises(DeferMessage):
-        await handle_review_request(memo(), live, engine=engine, store=store)
-
-
-async def test_a_deferral_leaves_no_review_behind(live, store):
-    """The replay re-runs the handler from scratch. A store entry left behind would bounce the
-    replay off the one-at-a-time guard, and the memo would be answered with "이미 검토 중" forever."""
-    engine = FakeEngine(ClaudeUsageLimit("429"))
-    with pytest.raises(DeferMessage):
-        await handle_review_request(memo(), live, engine=engine, store=store)
-
-    assert store.has_pending() is False
-    assert notes(live) == []
-
-
-async def test_an_unexpected_error_leaves_no_review_behind(live, store):
-    """A leaked review is worse than the error that caused it: it would block every later review
-    on the one-at-a-time guard, with the poller waiting on a draft that does not exist."""
-    engine = FakeEngine(RuntimeError("a bug, not a ClaudeError"))
-
-    with pytest.raises(RuntimeError):
-        await handle_review_request(memo(), live, engine=engine, store=store)
-
-    assert store.has_pending() is False
 
 
 # ----------------------------------------------------- crash during the first turn
@@ -450,28 +243,25 @@ async def test_a_turn_that_died_with_the_app_does_not_wedge_the_review(live, sto
     assert len(notes(live)) == 1
 
 
-async def test_a_replayed_memo_gets_a_review_after_the_crashed_one_is_discarded(live, store):
-    """The whole point: dropping the dead review is what lets catch-up's replay actually work.
-
-    The HWM never advanced (the handler died before returning), so the memo replays — and it must
-    not be answered with "이미 검토 중" by the wreckage of its own previous attempt.
-    """
-    store.create(message_id=7, session_id="dead", title="검토 중", source_date=DATE)
-    discard_incomplete(store)
-
-    result = await handle_review_request(
-        memo(message_id=7), live, engine=FakeEngine(ClaudeResult(text=DRAFT)), store=store
-    )
-
-    assert "이미 검토 중" not in result.reply
-    assert store.pending().draft
-
-
 # ----------------------------------------------------------- accepting the draft
-async def _open_review(live, store, engine=None) -> None:
-    await handle_review_request(
-        memo(), live, engine=engine or FakeEngine(ClaudeResult(text=DRAFT)), store=store
+async def _open_review(live, store, *, note_type: str = "meeting-note") -> None:
+    """A review that has been asked about, in the state a producer leaves it in.
+
+    Built directly rather than through `handle_audio`, on purpose. Increment 4's version of this
+    called `handle_review_request` — `#검토` was the producer, and it was cheap. Audio is not: going
+    through it would drag Whisper, a download and a staging dir into every test of *cancelling*.
+    The producer→loop seam is asserted where it belongs, in `test_audio_handler.py`; from here down
+    the only thing that matters is that a draft exists and the owner has been asked about it.
+    """
+    review = store.create(
+        message_id=7, session_id="sess-1", title="3분기 인프라 예산 회의",
+        source_date=DATE, note_type=note_type,
     )
+    title, body, questions = parse_draft(DRAFT)
+    review.title = title
+    review.questions = questions
+    review.write_draft(body)
+    activate(review, store)
 
 
 @pytest.mark.parametrize("word", ["확인", "ok", "OK", "네", "저장", "확인!", "확인.", "ok!"])
@@ -484,8 +274,10 @@ async def test_accepting_writes_the_note_and_ends_the_review(live, store, word):
     assert "저장됨" in reply
     assert len(notes(live)) == 1
     assert store.has_pending() is False
-    # Accepting needs no engine call: the draft on disk *is* what the owner just approved.
-    assert engine.calls == []
+    # The *note* still needs no engine call — the draft on disk is what the owner just approved.
+    # The one call here is the glossary turn, which is best-effort and cannot cost them the note
+    # (test_a_failed_glossary_turn_never_costs_the_owner_their_note).
+    assert len(engine.calls) == 1
 
 
 async def test_an_accepted_note_is_marked_reviewed_and_dated_by_the_memo(live, store):
@@ -523,30 +315,30 @@ async def test_cancelling_discards_the_draft(live, store):
 
 # -------------------------------------------------------------- revising a draft
 async def test_a_correction_resumes_the_same_session(live, store):
-    engine = FakeEngine(ClaudeResult(text=DRAFT), ClaudeResult(text=REVISED))
-    await _open_review(live, store, engine)
+    engine = FakeEngine(ClaudeResult(text=REVISED))
+    await _open_review(live, store)
     session_id = store.pending().session_id
 
     reply = await handle_reply("담당자는 김철수, 기한은 7월 24일", live, store=store, engine=engine)
 
-    assert engine.calls[1]["resume"] == session_id
-    assert engine.calls[1]["cwd"] == store.pending().work_dir
+    assert engine.calls[0]["resume"] == session_id
+    assert engine.calls[0]["cwd"] == store.pending().work_dir
     assert "김철수" in reply
     assert "김철수" in store.pending().draft
 
 
 async def test_the_correction_text_reaches_the_prompt(live, store):
-    engine = FakeEngine(ClaudeResult(text=DRAFT), ClaudeResult(text=REVISED))
-    await _open_review(live, store, engine)
+    engine = FakeEngine(ClaudeResult(text=REVISED))
+    await _open_review(live, store)
 
     await handle_reply("담당자는 김철수", live, store=store, engine=engine)
-    assert "담당자는 김철수" in engine.calls[1]["prompt"]
+    assert "담당자는 김철수" in engine.calls[0]["prompt"]
 
 
 async def test_a_revision_loops_back_to_awaiting_not_to_a_note(live, store):
     """The owner reviews a revision before it becomes a note — a correction is not an acceptance."""
-    engine = FakeEngine(ClaudeResult(text=DRAFT), ClaudeResult(text=REVISED))
-    await _open_review(live, store, engine)
+    engine = FakeEngine(ClaudeResult(text=REVISED))
+    await _open_review(live, store)
 
     await handle_reply("담당자는 김철수", live, store=store, engine=engine)
 
@@ -555,8 +347,8 @@ async def test_a_revision_loops_back_to_awaiting_not_to_a_note(live, store):
 
 
 async def test_the_review_can_be_accepted_after_a_revision(live, store):
-    engine = FakeEngine(ClaudeResult(text=DRAFT), ClaudeResult(text=REVISED))
-    await _open_review(live, store, engine)
+    engine = FakeEngine(ClaudeResult(text=REVISED))
+    await _open_review(live, store)
     await handle_reply("담당자는 김철수", live, store=store, engine=engine)
 
     await handle_reply("확인", live, store=store, engine=engine)
@@ -594,8 +386,8 @@ async def test_an_empty_reply_is_ignored(live, store):
 async def test_a_usage_limit_mid_review_keeps_the_review_alive(live, store):
     """The asymmetry the resume contract creates: the transcript is on disk (row 5), so this is
     survivable — the owner just re-sends after the window resets. Nothing is written, nothing lost."""
-    engine = FakeEngine(ClaudeResult(text=DRAFT), ClaudeUsageLimit("429 limit reached"))
-    await _open_review(live, store, engine)
+    engine = FakeEngine(ClaudeUsageLimit("429 limit reached"))
+    await _open_review(live, store)
 
     reply = await handle_reply("담당자는 김철수", live, store=store, engine=engine)
 
@@ -608,8 +400,8 @@ async def test_a_usage_limit_mid_review_keeps_the_review_alive(live, store):
 async def test_a_usage_limit_mid_review_never_defers(live, store):
     """DeferMessage here would propagate out of the poller's task, not into catch-up — and halting
     stops the poller, i.e. the only channel the retry could arrive on. Deadlock."""
-    engine = FakeEngine(ClaudeResult(text=DRAFT), ClaudeUsageLimit("429"))
-    await _open_review(live, store, engine)
+    engine = FakeEngine(ClaudeUsageLimit("429"))
+    await _open_review(live, store)
 
     # Must not raise.
     await handle_reply("수정해주세요", live, store=store, engine=engine)
@@ -617,9 +409,9 @@ async def test_a_usage_limit_mid_review_never_defers(live, store):
 
 async def test_the_owner_can_retry_after_a_usage_limit(live, store):
     engine = FakeEngine(
-        ClaudeResult(text=DRAFT), ClaudeUsageLimit("429"), ClaudeResult(text=REVISED)
+        ClaudeUsageLimit("429"), ClaudeResult(text=REVISED)
     )
-    await _open_review(live, store, engine)
+    await _open_review(live, store)
     await handle_reply("담당자는 김철수", live, store=store, engine=engine)
 
     reply = await handle_reply("담당자는 김철수", live, store=store, engine=engine)
@@ -631,8 +423,8 @@ async def test_the_owner_can_retry_after_a_usage_limit(live, store):
 async def test_a_lost_session_delivers_the_draft(live, store):
     """Terminal: there is nothing to resume, ever. So hand the owner what we have rather than
     stranding it — a draft without its review is still a draft."""
-    engine = FakeEngine(ClaudeResult(text=DRAFT), ClaudeSessionLost("No conversation found"))
-    await _open_review(live, store, engine)
+    engine = FakeEngine(ClaudeSessionLost("No conversation found"))
+    await _open_review(live, store)
 
     reply = await handle_reply("담당자는 김철수", live, store=store, engine=engine)
 
@@ -643,8 +435,8 @@ async def test_a_lost_session_delivers_the_draft(live, store):
 
 async def test_a_delivered_draft_is_marked_unreviewed(live, store):
     """It must be impossible to mistake a delivered draft for one the owner accepted."""
-    engine = FakeEngine(ClaudeResult(text=DRAFT), ClaudeSessionLost("gone"))
-    await _open_review(live, store, engine)
+    engine = FakeEngine(ClaudeSessionLost("gone"))
+    await _open_review(live, store)
     await handle_reply("수정", live, store=store, engine=engine)
 
     frontmatter, body = note_data(live)
@@ -655,8 +447,8 @@ async def test_a_delivered_draft_is_marked_unreviewed(live, store):
 
 async def test_a_transient_error_keeps_the_review_alive(live, store):
     """Not a lost session: the transcript is still there, so retrying can work."""
-    engine = FakeEngine(ClaudeResult(text=DRAFT), ClaudeError("engine hiccup"))
-    await _open_review(live, store, engine)
+    engine = FakeEngine(ClaudeError("engine hiccup"))
+    await _open_review(live, store)
 
     reply = await handle_reply("수정", live, store=store, engine=engine)
 
@@ -669,9 +461,9 @@ async def test_repeated_failures_give_up_and_deliver_the_draft(live, store):
     """The give-up that stops "stay and retry" from stranding a review forever against a
     permanently broken engine — the exact failure the state machine exists to prevent."""
     engine = FakeEngine(
-        ClaudeResult(text=DRAFT), ClaudeError("1"), ClaudeError("2"), ClaudeError("3")
+        ClaudeError("1"), ClaudeError("2"), ClaudeError("3")
     )
-    await _open_review(live, store, engine)
+    await _open_review(live, store)
 
     for _ in range(2):
         await handle_reply("수정", live, store=store, engine=engine)
@@ -687,9 +479,9 @@ async def test_repeated_failures_give_up_and_deliver_the_draft(live, store):
 async def test_a_successful_turn_resets_the_failure_count(live, store):
     """Failures must be *consecutive*, or a long review would eventually give up on itself."""
     engine = FakeEngine(
-        ClaudeResult(text=DRAFT), ClaudeError("blip"), ClaudeResult(text=REVISED)
+        ClaudeError("blip"), ClaudeResult(text=REVISED)
     )
-    await _open_review(live, store, engine)
+    await _open_review(live, store)
     await handle_reply("수정", live, store=store, engine=engine)
     await handle_reply("수정", live, store=store, engine=engine)
 
@@ -697,8 +489,8 @@ async def test_a_successful_turn_resets_the_failure_count(live, store):
 
 
 async def test_a_failed_revision_leaves_the_draft_intact(live, store):
-    engine = FakeEngine(ClaudeResult(text=DRAFT), ClaudeError("boom"))
-    await _open_review(live, store, engine)
+    engine = FakeEngine(ClaudeError("boom"))
+    await _open_review(live, store)
     before = store.pending().draft
 
     await handle_reply("수정", live, store=store, engine=engine)
@@ -989,9 +781,14 @@ async def test_an_empty_glossary_answer_adds_nothing(live, store):
     assert not live.glossary_path.exists()
 
 
-async def test_a_memo_review_makes_no_glossary_call(live, store):
-    """Only a transcript can teach the recogniser anything — a memo has nothing behind it."""
-    await _open_review(live, store)
+async def test_a_non_meeting_review_makes_no_glossary_call(live, store):
+    """Only a transcript can teach the recogniser anything.
+
+    Audio is the only producer today, so every real review is a meeting note — but the branch is
+    what keeps that from being an assumption. It guards the next producer (open decision 6: a text
+    review started from the bot DM), which will have no transcript behind it and nothing to file.
+    """
+    await _open_review(live, store, note_type="note")
     engine = FakeEngine()
 
     await handle_reply("확인", live, store=store, engine=engine)

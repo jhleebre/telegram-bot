@@ -417,3 +417,89 @@ async def test_queuing_a_review_does_not_erase_the_active_one(live, store, fake_
     await handle_audio(audio_message(8), live, engine=FakeEngine(), store=store)
 
     assert len(store.all_reviews()) == 2
+
+
+# ------------------------------- the producer contract (migrated from #검토's tests)
+# These claims were verified against `handle_review_request` in increment 4. That producer is gone;
+# the claims are not — they are properties of *any* producer, and audio is the only one now.
+async def test_the_session_id_is_pinned_before_the_call(live, store, fake_stt):
+    """Row 6 of the resume contract: the store records a resumable handle *before* the call that
+    creates the session, so a crash mid-call leaves something knowable rather than an orphan."""
+    engine = FakeEngine()
+
+    await handle_audio(audio_message(), live, engine=engine, store=store)
+
+    pinned = engine.calls[0]["session_id"]
+    assert pinned and store.pending().session_id == pinned
+    assert engine.calls[0].get("resume") is None
+
+
+async def test_the_job_runs_in_the_reviews_stable_dir_not_a_temp_one(live, store, fake_stt):
+    """The measured resume contract's central fact. A session is keyed by its cwd *path*, so the
+    pattern increments 2-3 use (a TemporaryDirectory deleted when the handler returns) would kill
+    the session before the owner had even read the question."""
+    engine = FakeEngine()
+
+    await handle_audio(audio_message(), live, engine=engine, store=store)
+
+    cwd = engine.calls[0]["cwd"]
+    assert cwd == store.pending().work_dir
+    # And it is still there after the handler returned — the point of the exercise.
+    assert Path(cwd).is_dir()
+    assert (Path(cwd) / "transcript.txt").is_file()
+
+
+async def test_an_unexpected_error_leaves_no_review_behind(live, store, fake_stt):
+    """A half-open review would hold a place in the queue for a draft that does not exist. We are
+    still alive here, so we can unwind — a *crash* cannot, which is discard_incomplete's job."""
+    engine = FakeEngine(RuntimeError("a broken template"))
+
+    with pytest.raises(RuntimeError):
+        await handle_audio(audio_message(), live, engine=engine, store=store)
+
+    assert store.all_reviews() == []
+    assert not stage_dir(live).exists()
+
+
+async def test_a_draft_is_not_a_note_until_the_owner_accepts_it(live, store, fake_stt):
+    result = await handle_audio(audio_message(), live, engine=FakeEngine(), store=store)
+
+    assert result.saved_path is None
+    assert notes(live) == []
+
+
+async def test_a_transcript_containing_the_sentinel_still_drafts(live, store, monkeypatch):
+    """First-line matching, not substring: a meeting where someone says "DRAFT_FAILED" out loud
+    (or reads an error code aloud) must still produce its note."""
+    monkeypatch.setattr(
+        whisper,
+        "transcribe",
+        lambda *a, **kw: whisper.Transcript(
+            text="DRAFT_FAILED 라는 에러 코드에 대해 논의했습니다.",
+            segments=[whisper.Segment(0.0, 3.0, "DRAFT_FAILED 라는 에러 코드에 대해 논의했습니다.")],
+        ),
+    )
+
+    await handle_audio(audio_message(), live, engine=FakeEngine(), store=store)
+
+    assert store.pending() is not None
+    assert notes(live) == []
+
+
+async def test_a_replayed_recording_gets_a_review_after_the_crashed_one_is_discarded(
+    live, store, fake_stt
+):
+    """Dropping a dead review is what lets catch-up's replay work.
+
+    The HWM never advanced (the handler died before returning), so the recording replays — and it
+    must not bounce off the wreckage of its own previous attempt.
+    """
+    store.create(message_id=7, session_id="dead", title="회의록 작성 중", source_date=DATE)
+    from contextbot.handlers.conversation import discard_incomplete
+
+    discard_incomplete(store)
+
+    result = await handle_audio(audio_message(7), live, engine=FakeEngine(), store=store)
+
+    assert "대기" not in result.reply
+    assert store.pending().draft

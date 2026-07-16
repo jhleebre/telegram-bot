@@ -26,7 +26,7 @@ client can read Saved Messages history, which removes the 24h limit entirely.
 
 - **Phase 1 (implemented):** desktop app, Saved Messages ingestion with catch-up + live, bot-DM
   confirmations, health checks, and **text → Markdown note**.
-- **Phase 2 (in progress, one increment at a time):**
+- **Phase 2 (complete — built one increment at a time):**
   - ✅ **1. `claude -p` engine** — shared headless-CLI wrapper, plus its first use: text notes now
     get an **LLM-derived title, tags, and summary**. Falls back to the Phase 1 path (first line as
     title) when the CLI is missing, slow, or disabled, so the bot still works offline.
@@ -39,14 +39,21 @@ client can read Saved Messages history, which removes the 24h limit entirely.
     transcription of any text in it. `heic`/`bmp` are converted first, because neither the model
     nor the vault can render them. A failure still saves the image, with the reason in place of the
     description — the capture is never lost.
-  - ✅ **4. Human-in-the-loop review** — send `#검토 <메모>` and the bot drafts a note, then asks you
-    about anything it had to guess. Reply in the bot DM: `확인` saves it, `취소` drops it, and
-    anything else is applied and shown to you again. Built on resumable Claude Code sessions, so
-    each turn keeps full context, and a review **survives closing the app**. If it can't be
-    finished, the draft is saved anyway and marked unreviewed — a review never ends empty-handed.
-  - ⬜ 5. audio → meeting notes
+  - ✅ **4. Human-in-the-loop review** — the bot drafts a note, then asks you about anything it had
+    to guess. Reply in the bot DM: `확인` saves it, `취소` drops it, and anything else is applied and
+    shown to you again. Built on resumable Claude Code sessions, so each turn keeps full context,
+    and a review **survives closing the app**. If it can't be finished, the draft is saved anyway
+    and marked unreviewed — a review never ends empty-handed. *(Built and verified on a `#검토 <메모>`
+    prefix, which was scaffolding; increment 5 replaced it with audio and deleted it.)*
+  - ✅ **5. Audio → meeting note** — send a recording and it is transcribed **on your machine**
+    (`mlx-whisper`; no audio ever leaves it), corrected against your glossary, and drafted into a
+    structured meeting note — then reviewed with you over the bot DM (increment 4's loop). `확인`
+    saves it, files any terms the review confirmed into the glossary, and deletes the recording.
+    Send two recordings and the second is **queued**, not refused: it is transcribed and drafted
+    right away, and you are asked about it when the first review ends. See below — **the Whisper
+    model is a one-time download you have to run**.
 
-  Audio still replies "Phase 2 예정". See [docs/PHASE2.md](docs/PHASE2.md).
+  See [docs/PHASE2.md](docs/PHASE2.md).
 
   **Documents are PDF-only by design.** Export from Word/PowerPoint to PDF and send that — Claude
   Code reads PDFs natively, so the bot needs no converter, no extra dependency, and never has to
@@ -86,6 +93,26 @@ cp .env.example .env      # then fill in the values below
 Phase 2 also uses the **`claude` CLI** (already installed) to enrich notes. It needs no
 configuration — but `CLAUDE_MODEL`, `CLAUDE_TIMEOUT_SEC`, and `CLAUDE_ENABLED=false` (fully
 offline, no LLM) are available in `.env`.
+
+### One-time: the Whisper model (only if you send audio)
+
+`pip install` does **not** bring the speech-recognition model — `mlx-whisper` takes a HuggingFace
+repo id and would download ~1.5GB the first time it transcribes something. The bot refuses to let
+that happen inside a job you are waiting on, so fetch it once:
+
+```bash
+.venv/bin/python scripts/download_model.py          # --check first, to see if you need it
+brew install ffmpeg                                  # needed to decode audio
+```
+
+Until you do, the health panel reports **`whisper-stt` — model not downloaded**, and audio messages
+are answered with the reason. Everything else works without it.
+
+The **glossary** (`GLOSSARY_PATH`) is what stops speech recognition from quietly renaming things —
+it hears "티맵" as "팀웹". It defaults to `~/Documents/MarkNotes/.claude/contextbot/glossary.md`,
+inside the vault: private, backed up with the rest of your notes, and hidden from MarkNotes (which
+skips dotfolders) so it is not a note. It grows on its own — when you correct a name during a
+review, that correction is filed. No glossary is fine; you just get no term corrections.
 
 ### One-time login (you run this yourself)
 
@@ -161,13 +188,14 @@ src/contextbot/
 │   ├── claude_cli.py     # async wrapper over headless `claude -p` (JSON result, sessions)
 │   ├── parsing.py        # recover a JSON object from a model's free-text reply
 │   └── prompts/          # prompt templates (*.md)
-├── handlers/             # text + document handlers (audio/image are Phase 2 stubs)
-├── files/                # original-file policy (→ Downloads) + encoding / CSV rendering
+├── handlers/             # text / document / image / audio handlers + the review conversation
+├── stt/                  # local speech-to-text (mlx-whisper), ported in — no external project
+├── files/                # original-file policy (→ Downloads), encoding / CSV, images, glossary
 ├── notes/                # frontmatter, filename, atomic markdown writer
 └── ui/                   # PySide6 window + asyncio worker thread
 login.py                  # one-time interactive login (user-run)
 run.py                    # app entrypoint
-scripts/                  # build_app.sh (Dock .app bundle) + make_icon.py
+scripts/                  # build_app.sh (Dock .app bundle), make_icon.py, download_model.py
 tests/                    # pytest suite
 docs/                     # PHASE1.md, PHASE2.md
 ```

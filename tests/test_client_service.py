@@ -278,7 +278,7 @@ async def test_a_started_review_turns_polling_on(settings, tmp_path, monkeypatch
         _open_a_review(store, message_id=incoming.message_id)
         return HandlerResult(reply="초안이 준비됐습니다")
 
-    svc, store = _with_store(settings, [text_message(1, "#검토 메모")], tmp_path)
+    svc, store = _with_store(settings, [text_message(1, "회의 메모")], tmp_path)
     monkeypatch.setattr(cs, "route", _route)
 
     await svc.start()
@@ -295,7 +295,7 @@ async def test_a_review_opening_message_still_advances_the_hwm(settings, tmp_pat
         _open_a_review(store, message_id=incoming.message_id)
         return HandlerResult(reply="초안")
 
-    svc, store = _with_store(settings, [text_message(5, "#검토 메모")], tmp_path)
+    svc, store = _with_store(settings, [text_message(5, "회의 메모")], tmp_path)
     monkeypatch.setattr(cs, "route", _route)
 
     await svc.start()

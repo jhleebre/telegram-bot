@@ -1,13 +1,16 @@
 """The human-in-the-loop review loop: draft → ask → revise → accept.
 
-This is increment 4's plumbing (docs/PHASE2.md). It owns a review's whole lifecycle — starting one,
-routing the owner's bot-DM reply into it, and every way it can end — so increment 5's audio pipeline
-adds a *producer* of reviews rather than a second copy of the machinery.
+Built in increment 4, and this module owns a review's whole lifecycle from the moment a draft
+exists — the owner's bot-DM replies, revisions, acceptance, and every way it can end. A *producer*
+(today: `handlers/audio_handler.py`) makes the draft and hands it over; nothing about the machinery
+below is written twice.
 
-**The simple case it is built on is a memo prefixed `#검토`.** The delivery approach says to build
-the state machine on something cheap before the audio pipeline depends on it, and a memo is exactly
-that: no Whisper, no download, no staging, but the same multi-turn resume contract end-to-end. A
-plain memo is untouched — this route is opt-in.
+It was built and verified on a memo prefixed `#검토`, deliberately — the delivery approach says to
+stand the state machine up on something cheap before the audio pipeline depends on it, and a memo
+gave the same multi-turn resume contract with no Whisper in the path. **Increment 5 deleted that
+scaffolding once audio became the real producer**: a magic prefix in the *capture* channel made
+"throw it in Saved Messages and it becomes a note" conditional, which is the design that produced
+the `#검토된 사항` mangling bug. Its removal is why nothing here knows what a memo is.
 
 The rules the increment's open decision settled (recorded in full in docs/PHASE2.md):
 
@@ -19,19 +22,19 @@ The rules the increment's open decision settled (recorded in full in docs/PHASE2
   because the intent is unambiguous and Saved Messages still holds the input.
 - **A usage limit mid-review keeps the review alive.** The transcript is on disk and resumes after
   the window resets, so the owner just re-sends their reply. Nothing is written, nothing is lost.
+- **At most one review is ever *asked about*** — increment 5 added a queue rather than relaxing
+  that, because a bare `확인` must always be attributable. See `core/session_store.py`.
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from ..config import Settings
-from ..core.session_store import PendingReview, ReviewState, SessionStore, build_store
+from ..core.session_store import PendingReview, ReviewState, SessionStore
 from ..engine import prompts
-from ..files.glossary import GlossaryEntry, append_entries, parse_entries
 from ..engine.claude_cli import (
     ClaudeCLI,
     ClaudeError,
@@ -39,14 +42,11 @@ from ..engine.claude_cli import (
     ClaudeUsageLimit,
     build_engine,
 )
+from ..files.glossary import GlossaryEntry, append_entries, parse_entries
 from ..notes.markdown_writer import write_note
-from .base import DeferMessage, HandlerResult, IncomingMessage
 from .text_handler import clean_title
 
 logger = logging.getLogger("contextbot.handlers.conversation")
-
-# The opt-in trigger. Narrow on purpose: a memo without it takes the shipped one-shot path.
-REVIEW_PREFIX = "#검토"
 
 QUESTIONS_HEADING = "## 확인 요청"
 _TITLE_PREFIX = "제목:"
@@ -89,26 +89,6 @@ _SYSTEM_PROMPT = (
 
 
 # --------------------------------------------------------------------------- parsing
-def is_review_request(text: str) -> bool:
-    """True when a memo opts into the review loop.
-
-    The prefix must be a **word of its own** — followed by whitespace, or nothing at all. A bare
-    ``startswith`` also matches ``#검토된 사항 정리``, which is a memo about something reviewed, not
-    a request to review it; worse, ``strip_prefix`` would then hand the model ``된 사항 정리`` and
-    silently draft a note from mangled text. A Markdown heading (``# 검토 …``) has a space after
-    the hash and was never affected.
-    """
-    stripped = text.strip()
-    if not stripped.startswith(REVIEW_PREFIX):
-        return False
-    rest = stripped[len(REVIEW_PREFIX) :]
-    return rest == "" or rest[0].isspace()
-
-
-def strip_prefix(text: str) -> str:
-    return text.strip()[len(REVIEW_PREFIX) :].strip()
-
-
 def _draft_failed(text: str) -> bool:
     """True when a turn produced nothing usable.
 
@@ -372,107 +352,6 @@ def promote_next(store: SessionStore) -> str | None:
     if waiting:
         header += f" (뒤에 {waiting}건 더 대기 중)"
     return f"{header}\n\n{activate(review, store)}"
-
-
-# ------------------------------------------------------------------ starting one
-async def handle_review_request(
-    message: IncomingMessage,
-    settings: Settings,
-    *,
-    engine: ClaudeCLI | None = None,
-    store: SessionStore | None = None,
-) -> HandlerResult:
-    """`#검토 <memo>` → draft it, ask about it, and wait for the owner in the bot DM."""
-    store = store or build_store(settings)
-    text = strip_prefix(message.text)
-    if not text:
-        return HandlerResult(reply="검토할 내용이 없습니다 — `#검토` 뒤에 메모를 적어주세요.")
-
-    if not settings.claude_enabled:
-        # No engine means no draft, and a review of nothing is nothing. Save the memo as a plain
-        # note rather than losing it: the capture is the point, the review is the upgrade.
-        return _plain_note(message, settings, text, "Claude 엔진이 꺼져 있습니다 (CLAUDE_ENABLED=false)")
-
-    if store.has_pending():
-        # One review at a time (see SessionStore). Reply and advance rather than defer: deferring
-        # would halt the bot, which stops the poller and leaves the open review unanswerable —
-        # a deadlock. The memo stays in Saved Messages, so re-sending it costs nothing.
-        return HandlerResult(
-            reply="🔒 이미 검토 중인 초안이 있습니다.\n"
-            "그 검토를 먼저 끝낸 뒤 이 메모를 다시 보내주세요."
-        )
-
-    # Pin the session id and record the handle *before* the call that creates the session, so a
-    # crash mid-call leaves something resumable rather than an orphan (measured: --session-id is
-    # honoured, and resuming does not fork the id).
-    review = store.create(
-        message_id=message.message_id,
-        session_id=str(uuid.uuid4()),
-        title="검토 중",
-        source_date=message.date,
-    )
-
-    engine = engine or build_engine(settings)
-    try:
-        result = await engine.run(
-            prompts.render(
-                "review_draft",
-                text=text,
-                sentinel=_SENTINEL,
-                questions_heading=QUESTIONS_HEADING,
-            ),
-            system_prompt=_SYSTEM_PROMPT,
-            session_id=review.session_id,
-            add_dirs=[review.work_dir],
-            cwd=review.work_dir,
-            timeout_sec=max(settings.claude_timeout_sec, _REVIEW_TIMEOUT_SEC),
-        )
-        if _draft_failed(result.text):
-            raise ClaudeError("초안을 만들지 못했습니다")
-    except ClaudeUsageLimit as exc:
-        # Turn 1 *is* a capture, so the usage-limit policy applies here in full. Unwind the store
-        # entry first: this is a deliberate abort, and a replay that found a live review would
-        # bounce off the one-at-a-time guard above. (A *crash* leaves the entry — that is the case
-        # it exists for.)
-        store.remove(review.message_id)
-        logger.warning("usage limit; deferring message %s: %s", message.message_id, exc)
-        raise DeferMessage(str(exc)) from exc
-    except ClaudeError as exc:
-        store.remove(review.message_id)
-        logger.warning("draft failed for message %s: %s", message.message_id, exc)
-        return _plain_note(message, settings, text, str(exc))
-    except Exception:
-        # Anything unforeseen (a broken template, a bug) must not leave a half-open review behind:
-        # it would block every later one on the guard above, and the poller would sit waiting on a
-        # draft that does not exist. We are still alive here, so we can unwind. A *crash* cannot,
-        # which is what discard_incomplete cleans up at the next start.
-        store.remove(review.message_id)
-        raise
-
-    title, body, questions = parse_draft(result.text)
-    review.title = title or "검토 노트"
-    review.questions = questions
-    review.write_draft(body)
-    # `activate` flips it out of QUEUED and stamps the clock at the moment the owner is asked (see
-    # there). A memo is never queued: the guard above bounced it, because re-sending a memo is free.
-    return HandlerResult(reply=activate(review, store))
-
-
-def _plain_note(message: IncomingMessage, settings: Settings, text: str, reason: str) -> HandlerResult:
-    """No draft is possible → save the memo as an ordinary note. Never lose the capture."""
-    path = write_note(
-        inbox_dir=settings.inbox_dir,
-        body=text,
-        title=clean_title(text.splitlines()[0]) or "메모",
-        when=message.date,
-        source="telegram",
-        note_type="note",
-        tags=[],
-        extra={"telegram_message_id": message.message_id},
-    )
-    return HandlerResult(
-        reply=f"📝 저장됨: {path.name}\n⚠️ 검토 없이 저장했습니다 — {reason}", saved_path=path
-    )
 
 
 # ------------------------------------------------------------ the owner's replies
