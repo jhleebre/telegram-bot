@@ -853,7 +853,9 @@ is briefly unhappy". Re-measured while building it, and the precise shape matter
 ### Increment 4 (as built) — human-in-the-loop review plumbing
 
 Delivered: `core/session_store.py` (the pending review), `core/review_poller.py` (bot-DM polling —
-**a module the sketch above did not name**, because the split from `Notifier` earns its own file),
+**a module the sketch above did not name**, because the split from `Notifier` earns its own file;
+**renamed `core/bot_dm_poller.py`** when open decision 6 made it poll all the time — "review" was
+its activation rule, not its identity),
 `handlers/conversation.py` (the whole review lifecycle), `engine/prompts/review_draft.md` +
 `review_revise.md`, `ClaudeSessionLost`, the `REVIEW_EXPIRY_HOURS` setting, and the `ClientService`
 wiring. Suite: 341 → **474**.
@@ -1770,8 +1772,9 @@ Increment 4 adds `test_conversation.py` (the state machine: the draft turn, the 
 review behind*, a usage limit on turn 2 keeping the review alive, a lost session delivering the
 draft, the give-up counter, expiry), `test_session_store.py` (the work-dir isolation, the file as
 authority across two store instances, restart survival, `created_at` vs `source_date`), and
-`test_review_poller.py` (the owner filter, **the backlog filter and the restart case it protects**,
-offset advance, the tick, transport errors). `ClaudeSessionLost` is covered in `test_claude_cli.py`
+`test_bot_dm_poller.py` (the owner filter, **the backlog filter and the restart case it protects**,
+offset advance, the tick, transport errors — renamed with its module, and the backlog cases rewritten
+when decision 6 made that filter *report* rather than drop). `ClaudeSessionLost` is covered in `test_claude_cli.py`
 against the fake-CLI subprocess, the two review templates in `test_prompts.py` (including the tilde
 rule, which is parametrized per template so a new one cannot forget it), the prefix dispatch in
 `test_router.py`, and the poller lifecycle + the HWM-advances-on-review rule in

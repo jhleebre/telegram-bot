@@ -201,7 +201,7 @@ src/contextbot/
 ├── core/
 │   ├── client_service.py # Telethon input (catch-up + live) + dispatch + bot reply
 │   ├── session_store.py  # the pending review: draft, resume handle, work dir, queue
-│   ├── review_poller.py  # bot-DM polling, only while a review is open
+│   ├── bot_dm_poller.py  # bot-DM polling, whenever the app is up
 │   ├── notifier.py       # send-only bot → owner DM
 │   ├── hwm.py            # high-water-mark (last processed Saved Messages id)
 │   ├── router.py         # classify + route → handlers
