@@ -310,10 +310,12 @@ src/contextbot/
 │   ├── elided_label.py     # ✅ increment 5 — a QLabel that ends in `…` instead of clipping
 │   └── bot_worker.py       #    Qt thread ↔ asyncio loop; asks for health when start() resolves
 │                           #    (status_widget.py deleted with the pulsing status face)
+├── localtime.py            # ✅ post-5 fix — the clock a note is written on (Telethon reports UTC)
 └── files/                  # ✅ built in increments 2–3
     ├── originals.py        # original-file policy (Downloads / delete / keep-and-embed)
     ├── images.py           # ✅ increment 3 — heic/bmp → PNG, so the model actually *sees* it
     ├── glossary.py         # ✅ increment 5 — read/append the vault's term table (never commits)
+    ├── audio_meta.py       # ✅ post-5 fix — when a recording's metadata says where it was made
     └── text_files.py       # encoding detection + deterministic CSV → Markdown table
 ```
 
@@ -1260,6 +1262,10 @@ health probes, five settings, the vault's **filename convention** across every r
 **deletion of the `#검토` scaffolding**, and the **window** the new probes broke. Suite: 474 → **636**
 (it peaked at 601 and *drops* here, because the scaffolding's ~28 tests went with their subject).
 
+Since shipped, one owner-found fix: **every note was written in UTC** — `localtime.py`,
+`files/audio_meta.py`, `NOTE_TIMEZONE`, and the conversion at `route()`. See *The post-increment fix*
+below; it is the only thing in Phase 2 that was wrong on **every** route rather than one.
+
 **The decisions above all held.** What follows is what building it changed or found.
 
 #### Three things the vault knew and this document did not
@@ -1627,6 +1633,87 @@ background task turns away from the handler that downloaded the file.
   **note is still written** and the reply says the glossary was skipped. `확인` must never cost the
   owner the note they just approved.
 
+#### The post-increment fix: every note was written in UTC (owner-found, in real use)
+
+The first real meeting note came back with an Overview table nine hours off, and the cause was one
+that no test could have failed on: Telethon hands us `message.date` as UTC-aware, and every render
+site formatted it as-is. `strftime` on a UTC datetime prints the *UTC* wall clock — a perfectly
+well-formed timestamp that is simply not the one anybody read. **UTC was never wrong about the
+instant; it was answering a question nobody asked.** A datetime carries two separable facts — which
+instant, and whose clock — and the code only ever handled the first.
+
+**It was never only the meeting note.** The same value named the file and filled the frontmatter, so
+the fix had to be wider than the report:
+
+| Surface | Was | Now |
+|---|---|---|
+| `meeting_note.md`'s `\| Date \|` | the UTC wall clock — **what the owner saw** | the meeting's own clock |
+| `YYMMDD-` filename | the UTC date — a note captured **before 09:00 KST filed under yesterday** | the local date |
+| frontmatter `date:` | `+00:00` | the local offset |
+
+The middle row is the one worth keeping in mind: **nobody reported it, and nobody would have.** A
+note filed one day early is not visibly broken — it is a note, on a plausible date, and only a reader
+who goes looking for a specific morning ever finds out. It shipped in increments 1–5 and rode along
+under a bug that was only noticed because the *meeting* route prints the clock where a human reads it.
+
+**The conversion happens in `route()`, and that placement is the point.** It is the one gate every
+handler passes through, so no handler — including one written next year — can forget it, and the
+failure mode if it did is a confidently-wrong note that nothing downstream can catch. Same reasoning
+as the audio deletion above: an obligation someone has to remember is one that leaks. `as_local` is
+idempotent so the audio pipeline can re-derive its own answer on top without the two fighting.
+
+**`NOTE_TIMEZONE`, not a hardcoded `+09:00`.** A fixed offset would be the same class of bug wearing
+a different hat — wrong in a zone with DST, wrong when the owner travels. An unknown zone name
+**refuses to start** rather than falling back to Seoul: the symptom of a silently wrong zone is
+exactly the confidently-wrong note this setting exists to end.
+
+##### The recording's own metadata beats the send time — where it exists, which is rarely
+
+The owner asked for the better answer: date a meeting by where it was *recorded*, not where it was
+uploaded from. This is real — `message.date` is the **upload** time, so a meeting recorded at 14:30
+and sent that evening was dated by the evening even once the zone was right — but the ceiling on it
+is set by what actually survives in a container, and that had to be measured rather than assumed:
+
+- **`com.apple.quicktime.creationdate` → `2026-07-17T14:30:00+0900`.** The only tag that answers the
+  question. The offset is the recording device's own, so it carries *both* the instant and whose
+  clock — which is what "where was this recorded" reduces to in a form that survives a file transfer.
+  It lives in the QuickTime `mdta` box, so a re-encoder **drops** it rather than inventing one: its
+  presence is evidence, not decoration.
+- **`creation_time` → rejected, and this is the load-bearing one.** It is the obvious tag to reach
+  for and it is a trap. The MP4 spec defines it as UTC and ffprobe normalizes it to `Z`, so it
+  repeats the instant Telegram already gave us and knows nothing about where. Worse, **every encoder
+  stamps it** — ffmpeg writes the transcode time by default — so on a re-encoded file it is a
+  confident lie about the recording time. Reading it would trade a knowably-wrong date for an
+  unknowably-wrong one, which is the `.heic`/`.docx` fabrication lesson in date form.
+- **ID3 `TDRC` → rejected.** No offset, and ID3v2.4 says UTC while half the world writes local time
+  into it. Unresolvable.
+- **GPS (`location.ISO6709`) → rejected.** Coordinates need a lat/lon→zone lookup (`timezonefinder`
+  plus map data) to become an offset, and Apple writes it *alongside* `creationdate`, which already
+  carries the answer outright. A real dependency for no gain.
+
+So: **an explicit UTC offset or nothing**, and the metadata time is used **as-is, never re-converted**
+— forcing a Berlin meeting onto Seoul's clock would discard the one fact it came for.
+
+**Nothing is the common answer, by a wide margin.** A Telegram *voice message* is re-encoded to Opus
+and arrives with **no tags whatsoever** (measured). This pays off only for a recording sent as a
+**file** — which is how a real meeting arrives anyway, since voice messages are memos. The fallback
+is the path most meetings take, so it is not a corner case and is tested as the main one.
+
+`ffprobe` adds no dependency (mlx-whisper already shells out to ffmpeg) and is treated as optional at
+runtime: missing, wedged, or fed garbage, it returns `None` and the note gets the configured zone.
+**A meeting note is worth more than this answer** — nothing here fails a note.
+
+##### The tests build real files and run the real ffprobe
+
+`test_audio_meta.py` encodes actual m4a/mp3/oga with ffmpeg rather than mocking the probe. The whole
+module is a bet about what a muxer preserves and what it normalizes away, and **a fake ffprobe would
+only confirm that bet back to itself** — the two facts worth having are exactly the ones it cannot
+hold: that Apple's `+0900` survives a write/read round-trip, and that `creation_time` does not. Same
+reasoning that made `files/images.py` drive the real `sips` (increment 3).
+
+The fix was also checked the only way a "the tests pass" claim is worth anything here: **reverted,
+re-run, and watched to fail** — 6 tests, then restored.
+
 ## C. PDF → Markdown
 
 - **PDF only.** Stage the downloaded PDF alone in a temp dir, `--add-dir` that dir, and let Claude
@@ -1797,3 +1884,9 @@ have the model on disk". `test_ui_smoke.py` grew from 3 tests to 27 and `test_bo
 — the window is where this increment's last four bugs were, and every one was a layout constant or a
 race that raised nothing. Suite: 474 → 601, then **636**: the `#검토` tests went with their subject
 (573), and the rest is the audio pipeline's own edges plus the window's.
+
+The post-increment UTC fix adds `test_localtime.py` and `test_audio_meta.py` (real files, real
+`ffprobe` — see that section for why a mock would have been worthless), plus the dating cases in
+`test_router.py`, `test_audio_handler.py`, and `test_config.py`. Suite: **689**. The assertions are
+all about the *rendered wall clock* and the *filename*, because that is the only place the fault was
+ever visible — the stored instant was right the whole time.

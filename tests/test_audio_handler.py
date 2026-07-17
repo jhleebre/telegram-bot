@@ -8,6 +8,8 @@ anywhere else — so every failure path is checked for what it leaves behind, no
 says.
 """
 
+import shutil
+import subprocess
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -564,3 +566,112 @@ async def test_the_drafting_turn_gets_the_meeting_timeout_not_the_default(live, 
     await handle_audio(audio_message(), tuned, engine=engine, store=store)
 
     assert engine.calls[0]["timeout_sec"] == 7200.0
+
+
+# ------------------------------------------------- the clock the meeting was held on
+def _real_m4a(tmp_path: Path, *metadata: str) -> bytes:
+    """A real one-second m4a carrying `metadata`, so the handler's ffprobe has something to read."""
+    dest = tmp_path / "built.m4a"
+    args = ["ffmpeg", "-v", "quiet", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-c:a", "aac"]
+    for item in metadata:
+        args += ["-metadata", item]
+    args += ["-movflags", "use_metadata_tags", "-y", str(dest)]
+    subprocess.run(args, check=True)
+    return dest.read_bytes()
+
+
+def recorded_message(content: bytes, message_id: int = 7, date=DATE) -> IncomingMessage:
+    """An audio message whose download yields real bytes rather than the usual canned string."""
+    class _Raw:
+        async def download_media(self, file):
+            Path(file).write_bytes(content)
+            return file
+
+    return IncomingMessage(
+        user_id=1, chat_id=1, message_id=message_id, date=date, kind=MessageKind.AUDIO,
+        text="", file_name="meeting.m4a", mime_type="audio/mp4", raw=_Raw(),
+    )
+
+
+async def test_the_overview_table_shows_the_owners_clock_not_utc(live, store, fake_stt):
+    """**The reported bug.** A meeting held at 14:30 in Seoul was captioned `2026-07-17 05:30` —
+    Telethon's UTC, formatted as if it were local. The model writes this straight into the note's
+    Overview table, so the wrong number is what the owner reads."""
+    engine = FakeEngine()
+    sent_at = datetime(2026, 7, 17, 5, 30, tzinfo=timezone.utc)  # 14:30 KST
+
+    await handle_audio(recorded_message(b"fake", date=sent_at), live, engine=engine, store=store)
+
+    assert "2026-07-17 14:30" in engine.calls[0]["prompt"]
+    assert "05:30" not in engine.calls[0]["prompt"]
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg to build a tagged recording")
+async def test_a_recordings_own_metadata_beats_the_send_time(live, store, fake_stt, tmp_path):
+    """What the owner actually asked for: when the file says where and when it was recorded, that
+    wins. This also fixes a second, quieter wrong: `message.date` is when the recording was
+    *uploaded*, so a meeting recorded at 14:30 and sent that evening was dated by the evening."""
+    content = _real_m4a(tmp_path, "com.apple.quicktime.creationdate=2026-07-17T14:30:00+0900")
+    engine = FakeEngine()
+    sent_at = datetime(2026, 7, 17, 11, 10, tzinfo=timezone.utc)  # uploaded 20:10 KST, hours later
+
+    await handle_audio(recorded_message(content, date=sent_at), live, engine=engine, store=store)
+
+    assert "2026-07-17 14:30" in engine.calls[0]["prompt"]
+    assert "20:10" not in engine.calls[0]["prompt"]
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg to build a tagged recording")
+async def test_a_meeting_recorded_abroad_is_dated_where_it_happened(live, store, fake_stt, tmp_path):
+    """The recording's offset is used **as-is**, never re-converted to NOTE_TIMEZONE — forcing a
+    Berlin meeting onto Seoul's clock would throw away the one fact the metadata came for."""
+    content = _real_m4a(tmp_path, "com.apple.quicktime.creationdate=2026-07-17T09:15:00+0200")
+    engine = FakeEngine()
+
+    await handle_audio(recorded_message(content), live, engine=engine, store=store)
+
+    assert "2026-07-17 09:15" in engine.calls[0]["prompt"]
+
+
+async def test_a_recording_that_says_nothing_falls_back_to_the_configured_zone(live, store, fake_stt):
+    """The common case by a wide margin — a Telegram voice message has no metadata at all — so the
+    fallback is the path most meetings actually take, not a corner."""
+    engine = FakeEngine()
+    sent_at = datetime(2026, 7, 17, 23, 0, tzinfo=timezone.utc)  # 08:00 KST on the 18th
+
+    await handle_audio(recorded_message(b"no tags here", date=sent_at), live, engine=engine,
+                       store=store)
+
+    assert "2026-07-18 08:00" in engine.calls[0]["prompt"]
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg to build a tagged recording")
+async def test_the_note_is_filed_and_dated_by_the_recording_too(live, store, fake_stt, tmp_path):
+    """Not just the prompt: the filename's `YYMMDD` and the frontmatter `date:` are the same
+    question, and a note filed under a different day than its own Overview table says would be its
+    own bug."""
+    content = _real_m4a(tmp_path, "com.apple.quicktime.creationdate=2026-07-17T14:30:00+0900")
+    # Uploaded after midnight KST on the 18th — the send time would file it a day late.
+    sent_at = datetime(2026, 7, 17, 16, 0, tzinfo=timezone.utc)  # 01:00 KST, 18th
+    await handle_audio(recorded_message(content, date=sent_at), live, engine=FakeEngine(),
+                       store=store)
+    from contextbot.handlers.conversation import handle_reply
+
+    await handle_reply("확인", live, store=store, engine=FakeEngine(ClaudeResult(text="NONE")))
+
+    assert notes(live)[0].name.startswith("260717-회의-"), notes(live)[0].name
+    front, _ = note_data(live)
+    assert front["date"] == "2026-07-17T14:30:00+09:00"
+
+
+async def test_the_transcript_only_note_is_dated_the_same_way(live, store, fake_stt):
+    """The degradation path writes a note too, and it must not be the one place UTC leaks back in."""
+    sent_at = datetime(2026, 7, 17, 23, 0, tzinfo=timezone.utc)  # 08:00 KST on the 18th
+
+    await handle_audio(recorded_message(b"fake", date=sent_at), live,
+                       engine=FakeEngine(ClaudeError("boom")), store=store)
+
+    assert notes(live)[0].name.startswith("260718-회의-"), notes(live)[0].name
+    front, _ = note_data(live)
+    assert front["date"] == "2026-07-18T08:00:00+09:00"

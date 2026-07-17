@@ -7,6 +7,7 @@ a Telethon ``Message`` via duck typing so tests can use simple fakes.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
@@ -14,6 +15,7 @@ from typing import Awaitable, Callable, Optional
 from ..config import Settings
 from ..handlers.audio_handler import handle_audio
 from ..handlers.base import HandlerResult, IncomingMessage, MessageKind
+from ..localtime import as_local
 from ..handlers.document_handler import handle_document
 from ..handlers.image_handler import handle_image
 from ..handlers.text_handler import handle_text
@@ -122,8 +124,16 @@ async def route(message: IncomingMessage, settings: Settings) -> HandlerResult:
     prefix opting a memo into the review loop — and increment 5 deleted it along with the rest of
     that scaffolding: audio is the review loop's producer now, and a magic prefix in the capture
     channel was a wart on "throw it in Saved Messages and it becomes a note".
+
+    **The date is put on the owner's clock here, and here is the point.** Telethon's `message.date`
+    is UTC, and a note that renders it raw is silently nine hours wrong (see `localtime`). Doing it
+    at the one gate every handler passes through means no handler — including one written next year
+    — can forget to, and the failure mode if it did would be a plausible, confidently-wrong note that
+    nothing downstream could catch. The audio pipeline refines this per-recording; it does not
+    depend on it, because `as_local` is idempotent.
     """
     handler = ROUTING_TABLE.get(message.kind)
     if handler is None:
         return HandlerResult(reply="🤔 지원하지 않는 형식의 메시지입니다.")
+    message = dataclasses.replace(message, date=as_local(message.date, settings.note_timezone))
     return await handler(message, settings)

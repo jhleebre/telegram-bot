@@ -1,4 +1,5 @@
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -264,3 +265,31 @@ def test_a_bad_meeting_timeout_is_a_config_error(tmp_path, bad):
     env["CLAUDE_MEETING_TIMEOUT_SEC"] = bad
     with pytest.raises(ConfigError, match="CLAUDE_MEETING_TIMEOUT_SEC"):
         Settings.load(env, use_dotenv=False)
+
+
+# --------------------------------------------------------------------- NOTE_TIMEZONE
+def test_note_timezone_defaults_to_seoul(tmp_path):
+    """The owner is in Seoul, and before this setting existed every note was written in UTC."""
+    settings = Settings.load(_base_env(tmp_path), use_dotenv=False)
+    assert settings.note_timezone == ZoneInfo("Asia/Seoul")
+
+
+def test_note_timezone_override(tmp_path):
+    env = _base_env(tmp_path) | {"NOTE_TIMEZONE": "America/New_York"}
+    assert Settings.load(env, use_dotenv=False).note_timezone == ZoneInfo("America/New_York")
+
+
+@pytest.mark.parametrize("raw", ["Asia/Nowhere", "KST", "+09:00", "9"])
+def test_an_unknown_zone_refuses_to_start(tmp_path, raw):
+    """Loudly, rather than falling back to Seoul: the symptom of a silently-wrong zone is a note
+    that is confidently off by hours, which is the exact bug this setting exists to end."""
+    env = _base_env(tmp_path) | {"NOTE_TIMEZONE": raw}
+    with pytest.raises(ConfigError, match="NOTE_TIMEZONE"):
+        Settings.load(env, use_dotenv=False)
+
+
+def test_the_repr_still_hides_the_secrets(tmp_path):
+    """note_timezone joined the repr; the secrets must not have come along with it."""
+    text = repr(Settings.load(_base_env(tmp_path), use_dotenv=False))
+    assert "Asia/Seoul" in text
+    assert "deadbeef" not in text and "123:ABC" not in text
