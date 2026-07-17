@@ -21,6 +21,9 @@ The shape, and why each part is where it is:
    never a copy.
 4. **The audio waits in `review.audio_dir`**, outside `work_dir`. It dies when the review ends,
    because the review's tree does.
+5. **The meeting is dated by the recording when the recording says so**, and by the send time on the
+   configured zone when it does not — `_meeting_time`. This is the one pipeline where the two can
+   differ by more than the upload lag, because a recording is made somewhere and sent later.
 
 The rules from every prior increment still bind, and two of them bind harder here:
 
@@ -38,12 +41,15 @@ import asyncio
 import logging
 import shutil
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from ..config import Settings
 from ..core.session_store import SessionStore, build_store
 from ..engine import prompts
 from ..engine.claude_cli import ClaudeCLI, ClaudeError, ClaudeUsageLimit, build_engine
+from ..files import audio_meta
+from ..localtime import as_local
 from ..notes.markdown_writer import write_note
 from ..notes.naming import MEETING_CATEGORY
 from ..stt import whisper
@@ -110,6 +116,28 @@ def _glossary_section(settings: Settings) -> str:
 def _stage_dir(settings: Settings, message_id: int) -> Path:
     """Where the download and the transcript live between the handler and its possible replay."""
     return settings.session_path.parent / "audio" / str(message_id)
+
+
+async def _meeting_time(audio: Path, message: IncomingMessage, settings: Settings) -> datetime:
+    """When the meeting happened, on the clock the people in the room were reading.
+
+    Two sources, and the better one is the one the recording brings itself:
+
+    1. **The file's own metadata**, when it carries an explicit UTC offset. This is the only source
+       that knows *where* the recording was made, and it dates the note by the **recording** rather
+       than by the upload — so a meeting recorded at 14:30 and sent at 20:10 is dated 14:30, and one
+       recorded in Berlin is dated in Berlin's clock. Rare but exactly right; see `files/audio_meta`.
+    2. **The send time on the configured zone.** What every other pipeline uses, and the honest guess
+       when the file says nothing: the owner records and sends from Seoul, so the two agree to within
+       the gap between the meeting ending and the upload starting.
+
+    The metadata time is used **as-is, never re-converted**: its offset is the recording's answer to
+    the question, and forcing it back to `note_timezone` would discard the one fact we came for.
+    """
+    stamped = await audio_meta.recorded_at(audio)
+    if stamped is not None:
+        return stamped
+    return as_local(message.date, settings.note_timezone)
 
 
 async def _transcribe(audio: Path, settings: Settings, stage: Path) -> str:
@@ -184,14 +212,23 @@ async def handle_audio(
             "(원본은 Saved Messages에 그대로 있습니다)"
         )
 
+    # Resolved once, here, so every exit below dates the meeting the same way — the note, the
+    # filename, the prompt's Overview table, and the transcript-only degradation all get this value.
+    when = await _meeting_time(audio, message, settings)
+
     if not settings.claude_enabled:
         # STT is local, so the transcript survived a disabled engine. It is the expensive,
         # irreplaceable part — save it rather than losing the recording's content.
         return _transcript_note(
-            message, settings, transcript, stage, "Claude 엔진이 꺼져 있습니다 (CLAUDE_ENABLED=false)"
+            message,
+            settings,
+            transcript,
+            stage,
+            "Claude 엔진이 꺼져 있습니다 (CLAUDE_ENABLED=false)",
+            when=when,
         )
 
-    return await _draft(message, settings, transcript, stage, engine=engine, store=store)
+    return await _draft(message, settings, transcript, stage, when=when, engine=engine, store=store)
 
 
 async def _download(message: IncomingMessage, stage: Path) -> Path:
@@ -209,6 +246,7 @@ async def _draft(
     transcript: str,
     stage: Path,
     *,
+    when: datetime,
     engine: ClaudeCLI | None,
     store: SessionStore,
 ) -> HandlerResult:
@@ -220,7 +258,7 @@ async def _draft(
         message_id=message.message_id,
         session_id=str(uuid.uuid4()),
         title="회의록 작성 중",
-        source_date=message.date,
+        source_date=when,
         note_type=NOTE_TYPE,
         category=MEETING_CATEGORY,
     )
@@ -244,7 +282,7 @@ async def _draft(
                 "meeting_note",
                 transcript_path=str(review.work_dir / _TRANSCRIPT_NAME),
                 glossary=_glossary_section(settings),
-                meeting_date=message.date.strftime("%Y-%m-%d %H:%M"),
+                meeting_date=when.strftime("%Y-%m-%d %H:%M"),
                 sentinel=_SENTINEL,
                 questions_heading=QUESTIONS_HEADING,
             ),
@@ -270,7 +308,7 @@ async def _draft(
     except ClaudeError as exc:
         store.remove(review.message_id)
         logger.warning("meeting draft failed for message %s: %s", message.message_id, exc)
-        return _transcript_note(message, settings, transcript, stage, str(exc))
+        return _transcript_note(message, settings, transcript, stage, str(exc), when=when)
     except Exception:
         # Anything unforeseen must not leave a half-open review behind: it would hold a place in the
         # queue for a draft that does not exist. We are still alive, so we can unwind.
@@ -332,6 +370,8 @@ def _transcript_note(
     transcript: str,
     stage: Path,
     reason: str,
+    *,
+    when: datetime,
 ) -> HandlerResult:
     """No meeting note is possible → save the transcript. Never lose the recording's content.
 
@@ -344,7 +384,7 @@ def _transcript_note(
         category=MEETING_CATEGORY,
         body=f"> ⚠️ 회의록을 만들지 못해 전사 원문만 저장했습니다 — {reason}\n\n{transcript}",
         title=_fallback_title(message),
-        when=message.date,
+        when=when,
         source="telegram",
         note_type="transcript",
         tags=[],

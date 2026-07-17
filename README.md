@@ -103,6 +103,12 @@ Phase 2 also uses the **`claude` CLI** (already installed) to enrich notes. It n
 configuration — but `CLAUDE_MODEL`, `CLAUDE_TIMEOUT_SEC`, and `CLAUDE_ENABLED=false` (fully
 offline, no LLM) are available in `.env`.
 
+**Notes are dated on your clock, not Telegram's.** Telegram reports every message's time in UTC, so
+`NOTE_TIMEZONE` (default `Asia/Seoul`) is what turns that into the time you actually read — it sets
+the frontmatter `date:`, the `YYMMDD-` in the filename, and a meeting note's Overview table. Any
+IANA zone name works; an unknown one stops the bot at startup rather than guessing, because the
+symptom of a wrong zone is a note that is confidently off by hours.
+
 ### One-time: the Whisper model (only if you send audio)
 
 `pip install` does **not** bring the speech-recognition model — `mlx-whisper` takes a HuggingFace
@@ -122,6 +128,15 @@ it hears "티맵" as "팀웹". It defaults to `~/Documents/MarkNotes/.claude/con
 inside the vault: private, backed up with the rest of your notes, and hidden from MarkNotes (which
 skips dotfolders) so it is not a note. It grows on its own — when you correct a name during a
 review, that correction is filed. No glossary is fine; you just get no term corrections.
+
+**A recording is dated by the recording, when it can be.** Meeting notes are the one place the
+capture time is the wrong answer: you record at 14:30 and upload in the evening, and `NOTE_TIMEZONE`
+would only ever give you the upload. If the file's own metadata says when *and where* it was made —
+iOS writes `com.apple.quicktime.creationdate` with a real UTC offset — the meeting is dated by that
+instead, so one recorded abroad keeps the clock of the room it happened in. Most recordings say
+nothing (a Telegram voice message is re-encoded and arrives with no metadata at all), and those fall
+back to the upload time on your `NOTE_TIMEZONE` clock. Send a real meeting **as a file** to get the
+better answer.
 
 **Long meetings are fine, and slow is normal.** A real ~1-hour meeting measures about 13 minutes end
 to end — 5 of Whisper, 7 of drafting — and the bot tells you it got the recording, then goes quiet
@@ -196,7 +211,8 @@ and temporary inbox directories. In a headless environment, set `QT_QPA_PLATFORM
 
 ```
 src/contextbot/
-├── config.py             # settings from env/.env (api id/hash, bot token, inbox)
+├── config.py             # settings from env/.env (api id/hash, bot token, inbox, note timezone)
+├── localtime.py          # the clock a note is written on (Telegram reports UTC; you don't read it)
 ├── logging_setup.py      # file + in-memory (UI) logging
 ├── core/
 │   ├── client_service.py # Telethon input (catch-up + live) + dispatch + bot reply
@@ -215,7 +231,8 @@ src/contextbot/
 │   └── prompts/          # prompt templates (*.md)
 ├── handlers/             # text / document / image / audio handlers + the review conversation
 ├── stt/                  # local speech-to-text (mlx-whisper), ported in — no external project
-├── files/                # original-file policy (→ Downloads), encoding / CSV, images, glossary
+├── files/                # original-file policy (→ Downloads), encoding / CSV, images, glossary,
+│                         #   audio metadata (when a recording says where it was made)
 ├── notes/                # frontmatter, filename (YYMMDD-<분류>-slug), atomic writer
 └── ui/                   # compact status bar + asyncio worker thread
 login.py                  # one-time interactive login (user-run)

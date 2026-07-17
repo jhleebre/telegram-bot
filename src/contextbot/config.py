@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 try:  # optional dependency; the loader also works from a pre-populated environment
     from dotenv import load_dotenv
@@ -62,6 +63,15 @@ DEFAULT_CLAUDE_MEETING_TIMEOUT_SEC = 3600.0
 # letting it guess on the first few seconds of small talk.
 DEFAULT_WHISPER_MODEL = "mlx-community/whisper-large-v3-turbo"
 DEFAULT_WHISPER_LANGUAGE = "ko"
+# The clock every note is written on. Notes are dated for a person reading them in Seoul, not for a
+# machine — so the vault's `date:`, its `YYMMDD-` filenames, and a meeting note's Overview table all
+# render here. It is a *display* zone and nothing else: every instant the bot stores stays aware, and
+# comparisons keep running against UTC (see core/session_store.py).
+#
+# Env-tunable because the owner travels, and a fixed `+09:00` in the code would be a second bug of
+# the same shape as the UTC one it replaces. The audio pipeline overrides it per-recording when the
+# file says where it was made — see files/audio_meta.py.
+DEFAULT_NOTE_TIMEZONE = "Asia/Seoul"
 # How long a pending review waits for the owner before its draft is delivered unreviewed. Capped by
 # reality rather than taste: the Bot API retains updates for 24h, so a reply sent past that window
 # while the app is closed is dropped by Telegram and the review could never be finished anyway.
@@ -115,6 +125,9 @@ class Settings:
     whisper_model: str = DEFAULT_WHISPER_MODEL
     whisper_language: str = DEFAULT_WHISPER_LANGUAGE
     review_expiry_hours: float = DEFAULT_REVIEW_EXPIRY_HOURS
+    # Not a plain default: ZoneInfo is cached-but-mutable-ish and a shared instance on a frozen
+    # dataclass would be built at import time, before the env is read.
+    note_timezone: ZoneInfo = field(default_factory=lambda: ZoneInfo(DEFAULT_NOTE_TIMEZONE))
 
     def __repr__(self) -> str:  # pragma: no cover - trivial
         return (
@@ -132,7 +145,8 @@ class Settings:
             f"claude_meeting_timeout_sec={self.claude_meeting_timeout_sec}, "
             f"whisper_model={self.whisper_model!r}, "
             f"whisper_language={self.whisper_language!r}, "
-            f"review_expiry_hours={self.review_expiry_hours})"
+            f"review_expiry_hours={self.review_expiry_hours}, "
+            f"note_timezone={self.note_timezone.key!r})"
         )
 
     @classmethod
@@ -253,6 +267,19 @@ class Settings:
                         f"{claude_meeting_timeout_sec}"
                     )
 
+        # A bad zone name fails loudly at startup rather than silently falling back to Seoul: the
+        # symptom of a wrong zone is a note that is confidently off by hours, which is exactly the
+        # class of bug this setting exists to end. Better to refuse to start than to mis-date a vault.
+        note_timezone = ZoneInfo(DEFAULT_NOTE_TIMEZONE)
+        raw_timezone = (env.get("NOTE_TIMEZONE") or "").strip()
+        if raw_timezone:
+            try:
+                note_timezone = ZoneInfo(raw_timezone)
+            except (ZoneInfoNotFoundError, ValueError):
+                errors.append(
+                    f"NOTE_TIMEZONE must be an IANA zone name (e.g. Asia/Seoul), got {raw_timezone!r}"
+                )
+
         review_expiry_hours = DEFAULT_REVIEW_EXPIRY_HOURS
         raw_expiry = (env.get("REVIEW_EXPIRY_HOURS") or "").strip()
         if raw_expiry:
@@ -290,4 +317,5 @@ class Settings:
             whisper_model=whisper_model,
             whisper_language=whisper_language,
             review_expiry_hours=review_expiry_hours,
+            note_timezone=note_timezone,
         )
