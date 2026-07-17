@@ -362,6 +362,52 @@ def promote_next(store: SessionStore) -> str | None:
     return f"{header}\n\n{activate(review, store)}"
 
 
+# ------------------------------------------------- talking to the bot otherwise
+# Plain text, deliberately. `Notifier.send` calls `send_message(chat_id, text)` with **no
+# parse_mode**, so Telegram renders every reply literally — `**bold**` would arrive as asterisks.
+# And turning parse_mode on would be worse than untidy: note filenames are full of underscores
+# (`260716-회의-하반기_모두의_ai_전략_덱_검토.md`), which Markdown reads as italics, and a parse
+# error makes Telegram reject the message — which `Notifier` *swallows*, so a confirmation would
+# vanish rather than fail. Backticks are the project's existing convention for "type this", and
+# they read fine as quotes even unrendered.
+_USAGE = (
+    "메모·파일·녹음은 Saved Messages로 보내주세요 — 그게 노트가 되는 입구입니다.\n"
+    "이 대화는 회의록 초안을 함께 다듬는 곳이고요."
+)
+
+
+def bot_dm_status(store: SessionStore, *, stale: bool = False) -> str:
+    """What to say to an owner's message that no review is going to act on.
+
+    **Every message gets an answer, and the rule has no exceptions** — that is the point of it.
+    Telegram has no offline autoresponder to borrow (a bot is a token plus your code; when the code
+    is down, nothing answers), so the closest honest substitute is to answer *without fail* while
+    the app is up. Then **silence means exactly one thing: nothing is running.** Coalescing replies,
+    or staying quiet when there is "nothing to say", would hand that meaning back to ambiguity — the
+    silent no-op this replaces, where the owner could not tell a stopped bot from a broken one.
+
+    ``stale`` is the sharp case: the message was sent before the open review was asked about, so it
+    cannot be that review's answer (the poller's backlog rule). Saying so matters — the owner very
+    likely typed `확인` at a question they had not yet been shown, and a bare status reply would
+    look like their answer had been ignored.
+    """
+    review = store.pending()
+    if review is None:
+        return f"🤖 실행 중입니다 — 지금은 검토 중인 초안이 없습니다.\n\n{_USAGE}"
+
+    asking = (
+        f"📝 검토 중인 초안이 있습니다 — 「{review.title}」\n"
+        "고칠 부분을 알려주시거나, `확인` / `취소` 로 답해주세요."
+    )
+    if not stale:
+        return asking
+    return (
+        "⏳ 방금 그 메시지는 이 초안이 준비되기 전에 보내신 거라, 답장으로 반영하지 않았습니다.\n"
+        "(초안을 보시기 전에 하신 말이라 이 초안에 대한 답일 수는 없어서요)\n\n"
+        f"{asking}"
+    )
+
+
 # ------------------------------------------------------------ the owner's replies
 async def handle_reply(
     text: str,

@@ -14,13 +14,18 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > increments 2–3 use) → *Increment 4 (as built)* (the review state machine) → *The decisions,
 > settled* → *Increment 5 (as built)* (audio, the queue, the bugs only real runs found, and the
 > window).
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **636 passing**, no network or model runs.
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **648 passing**, no network or model runs.
 >
-> **Phase 2 is complete.** Every pipeline in *Scope* is shipped and owner-verified. The one thing
-> deliberately left open is **open decision 6** (should the bot DM answer when nobody asked it
-> anything — and should a plain message there *start* something). Increment 5 deleted `#검토`, so
-> **text has no interactive path today**: a Saved Messages memo is always a quick note, which is the
-> owner's stated model. That was a decision, not a side effect — see the decision itself.
+> **Phase 2 is complete.** Every pipeline in *Scope* is shipped and owner-verified, and every open
+> decision is settled — the last was **6**, closed after the merge: *the bot DM now answers every
+> message while the app is up*, which is the only offline signal Telegram makes available (there is
+> no autoresponder to borrow; a bot is a token plus your code). Silence therefore means exactly one
+> thing: nothing is running.
+>
+> One thing is deliberately **not** built: a plain message to the bot DM does not *start* anything.
+> It reports and points at Saved Messages. Increment 5 deleted `#검토`, so **text has no interactive
+> path today** — a Saved Messages memo is always a quick note, which is the owner's stated model.
+> That was a decision, not a side effect; the plumbing for the other choice is now in place.
 >
 > **Three lessons, one shape, five increments.** *Read the consumer's source; the model would rather
 > answer than admit it cannot see; the failures here are silent.* Increment 5 hit all three again:
@@ -288,7 +293,8 @@ src/contextbot/
 ├── core/
 │   ├── session_store.py    # ✅ increment 4 — the review: draft, resume handle, work dir
 │   │                       #    ✅ increment 5 — + the queue (QUEUED), note_type, tags
-│   └── review_poller.py    # ✅ increment 4 — bot-DM getUpdates, only while a review is open
+│   └── bot_dm_poller.py    # ✅ increment 4 — bot-DM getUpdates; polls whenever the app is
+│                           #    up (decision 6), reporting the backlog rule rather than dropping
 ├── handlers/
 │   ├── audio_handler.py    # ✅ increment 5 — audio → meeting note; the review loop's producer
 │   ├── image_handler.py    # ✅ built in increment 3 — image → described note
@@ -1678,30 +1684,58 @@ Still open (each is confirmed when its increment starts):
    and invisible to MarkNotes under `.claude/` (verified both). See *The decisions, settled* → 4.
    *(resolved)*
 
-6. **Should the bot DM answer when nobody asked it anything?** *(raised by the owner during
-   increment 4; deliberately not built there)* Today, talking to the bot with no review open is a
-   **silent no-op** — nothing polls, the message sits in Telegram's queue, and the timestamp filter
-   discards it when a review next opens. The discarding is *correct* (a stray `확인` from yesterday
-   must never accept a draft the owner has not seen), but the silence makes the bot read as broken.
-   The fix is small — poll whenever the app is up, and reply "검토 중인 초안이 없습니다" — and it is
-   safe precisely because **the bot DM is not the capture channel**, so the Bot API's 24h retention
-   cannot cost a message. That unlocks the bigger question the owner actually posed: **should a
-   plain message to the bot DM *start* something?** That is the natural end of the "capture vs
-   conversation" split (Saved Messages = arrival, bot DM = conversation), and it is also what
-   replaces `#검토` for text once the prefix is deleted. **Note the ordering trap:** increment 5
-   deletes `#검토`, and if this is not built then text loses its interactive path entirely. That is
-   fine — the owner's stated model is that Saved Messages text is *always* a quick note — but it
-   should be a decision, not a side effect.
+6. ~~**Should the bot DM answer when nobody asked it anything?**~~ — **resolved: yes, always, and
+   the rule has no exceptions.** *(Raised by the owner in increment 4, deliberately not built there;
+   settled after Phase 2 merged.)*
 
-   **Status after increment 5: the trap was walked into deliberately, and this is now the only open
-   item in Phase 2.** `#검토` is gone and this was not built, so **text has no interactive path
-   today** — a Saved Messages memo is always a one-shot note, exactly the owner's stated model. Two
-   things increment 5 leaves for whoever picks this up: the review loop no longer has *any* memo
-   producer, so a bot-DM-started text review would be a genuinely new one (`handle_audio` is the
-   pattern — pin the id, `store.create` before the call, `activate` when the draft exists); and
-   `_accept`'s glossary branch already keys on `note_type`, so a non-meeting review correctly files
-   nothing (`test_a_non_meeting_review_makes_no_glossary_call` pins it). The queue and `promote_next`
-   are media-agnostic and would need nothing.
+   The owner asked the sharper question first: **is there a BotFather/server setting that
+   auto-replies while the bot is off?** Checked against the Bot API rather than assumed — there is
+   nothing: no `away`, no `greeting`, no autoresponder of any kind. The adjacent features do not
+   substitute. `setMyDescription` only shows in an *empty* chat, so the owner (who pressed Start
+   long ago) would never see it; `setMyCommands` is a client-side menu that replies to nothing; and
+   `setWebhook` needs a server that is up 24/7, which is the exact opposite of this app's "no
+   background operation" goal. **A Telegram bot is not a server-side entity — it is a token plus
+   your code.** When the code is down, nothing answers, and nothing can be made to.
+
+   So the achievable half is the whole of it, and it turns out to be enough: **answer every message,
+   without fail, while the app is up.** Then silence stops being ambiguous and starts being
+   information — *nothing is running*. That is the honest version of what the owner wanted, and it
+   is strictly better than the old behaviour, where silence read the same whether the bot was
+   stopped, broken, or simply uninterested. Nothing is lost in the meantime either: the Bot API
+   retains updates for 24h, so a message sent to a stopped bot is queued and answered on the next
+   Start.
+
+   **What it took:**
+
+   - `core/review_poller.py` → **`core/bot_dm_poller.py`** (`ReviewPoller` → `BotDmPoller`). The
+     name was the old *activation rule*, not the module's identity, and keeping it would have made
+     the name lie.
+   - **`is_active` is the client's connection**, not `store.has_pending`. `stop()` disconnects, so
+     the loop needs no flag of its own to go stale.
+   - **The backlog filter reports instead of dropping.** This is the part worth reading twice. The
+     poller hands on `(text, answerable)`; dropping a stale message *here* would have rebuilt the
+     same silence one layer down — app off, owner types `확인`, app starts and opens a review during
+     catch-up, and the message they sent hours earlier vanishes without a word. It is answered, and
+     told **why** it was not applied, which matters because they very likely typed `확인` at a
+     question they had not yet been shown. Driven for real: the stale `확인` did not accept the
+     draft and wrote no note.
+   - **`conversation.bot_dm_status()`** — plain text, deliberately. `Notifier.send` passes no
+     `parse_mode`, so `**bold**` would arrive as asterisks; and *turning it on would be worse than
+     untidy*, because note filenames are full of underscores
+     (`260716-회의-하반기_모두의_ai_전략_덱_검토.md`), Markdown reads those as italics, and a parse
+     error makes Telegram reject the message — which `Notifier` **swallows**. A confirmation would
+     vanish rather than fail.
+
+   **Replies are per message, not coalesced** (owner's call). A batch summary would be quieter, but
+   it would hand the ambiguity straight back: if the bot sometimes answers and sometimes does not,
+   silence means nothing again.
+
+   **Still open — deliberately:** should a plain message to the bot DM *start* something? This is
+   the mechanical half only: the bot reports and points at `Saved Messages`, and does not act. That
+   remains the natural end of the "capture vs conversation" split, and the plumbing is now in place
+   for it — a producer would hook where `bot_dm_status` currently answers. Also unbuilt:
+   `setMyCommands` (`/status`, `/help`), which the owner declined for now — anything you type
+   already gets the status, so there is no command to discover yet.
 
 ### Cost note — the budget is plan usage, not dollars
 

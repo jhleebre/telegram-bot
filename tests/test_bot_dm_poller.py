@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from contextbot.core.review_poller import ReviewPoller
+from contextbot.core.bot_dm_poller import BotDmPoller
 
 OWNER = 42
 NOW = datetime(2026, 7, 15, 14, 30, tzinfo=timezone.utc)
@@ -59,13 +59,14 @@ class Harness:
 
     def __init__(self, bot, *, started=REVIEW_STARTED, on_tick=None):
         self.replies: list[str] = []
+        self.answerable: list[bool] = []
         self.offset = 0
         self.active = True
         self.started = started
-        self.poller = ReviewPoller(
+        self.poller = BotDmPoller(
             bot,
             OWNER,
-            on_reply=self._on_reply,
+            on_message=self._on_message,
             on_tick=on_tick,
             get_offset=lambda: self.offset,
             set_offset=self._set_offset,
@@ -73,8 +74,10 @@ class Harness:
             review_started_at=lambda: self.started,
         )
 
-    async def _on_reply(self, text):
+    async def _on_message(self, text, answerable):
+        # (text, answerable): the poller reports the backlog rule now instead of acting on it.
         self.replies.append(text)
+        self.answerable.append(answerable)
 
     def _set_offset(self, value):
         self.offset = value
@@ -113,7 +116,7 @@ async def test_a_message_from_another_chat_is_ignored():
     assert not await h.run_until(lambda: h.replies, timeout=0.3)
 
 
-async def test_a_message_sent_before_the_review_began_is_ignored():
+async def test_a_message_sent_before_the_review_began_is_not_answerable():
     """The filter that the offset alone cannot provide.
 
     Telegram retains updates for 24h, so a message the owner sent the bot *before* the review — or
@@ -123,7 +126,33 @@ async def test_a_message_sent_before_the_review_began_is_ignored():
     stale = FakeUpdate(1, FakeMessage("확인", date=REVIEW_STARTED - timedelta(hours=2)))
     h = Harness(FakeBot([stale]))
 
-    assert not await h.run_until(lambda: h.replies, timeout=0.3)
+    assert await h.run_until(lambda: h.replies, timeout=0.5)
+    assert h.answerable == [False], "it must not count as the review's answer"
+
+
+async def test_a_stale_message_is_still_handed_on_to_be_answered():
+    """It reports the rule rather than acting on it, and that distinction is the point.
+
+    Dropping it here rebuilt the same silence one layer down: app off, owner sends a message, app
+    starts and opens a review during catch-up, and the message they sent hours earlier vanishes
+    without a word. The client answers it; it just does not apply it.
+    """
+    stale = FakeUpdate(1, FakeMessage("확인", date=REVIEW_STARTED - timedelta(hours=2)))
+    h = Harness(FakeBot([stale]))
+
+    await h.run_until(lambda: h.replies, timeout=0.5)
+
+    assert h.replies == ["확인"]
+
+
+async def test_a_message_is_answerable_when_no_review_is_open():
+    """With nothing to answer there is nothing to answer *late* — and the client has a status
+    reply for it."""
+    h = Harness(FakeBot([FakeUpdate(1, FakeMessage("안녕"))]), started=None)
+
+    await h.run_until(lambda: h.replies, timeout=0.5)
+
+    assert h.answerable == [True]
 
 
 async def test_a_reply_sent_while_the_app_was_closed_is_still_accepted():
@@ -182,16 +211,16 @@ async def test_a_stored_offset_is_sent_on_the_first_poll():
     assert bot.calls[0]["offset"] == 100
 
 
-async def test_polling_stops_when_the_review_ends():
+async def test_polling_stops_when_the_app_goes_down():
     """The poller exists only while a review is open — that is what keeps capture independent of
     the Bot API's 24h retention limit."""
     h = Harness(FakeBot([FakeUpdate(1, FakeMessage("확인"))]))
 
-    async def end_review(text):
+    async def go_down(text, answerable):
         h.replies.append(text)
-        h.active = False
+        h.active = False   # as `stop()` disconnecting the client would
 
-    h.poller._on_reply = end_review
+    h.poller._on_message = go_down
     h.poller.start()
     for _ in range(100):
         if not h.poller.is_running:
@@ -221,7 +250,7 @@ async def test_the_tick_runs_each_interval():
     assert ticks
 
 
-async def test_a_tick_that_ends_the_review_stops_the_poll():
+async def test_a_tick_that_takes_the_app_down_stops_the_poll():
     """Expiry runs on the tick; when it retires the review, there is nothing left to poll for."""
     async def on_tick():
         h.active = False
@@ -253,9 +282,9 @@ async def test_stop_is_safe_before_start():
 async def test_no_owner_chat_id_means_no_polling():
     """Without a target there is nobody to read, and get_updates would be pure waste."""
     bot = FakeBot()
-    poller = ReviewPoller(
+    poller = BotDmPoller(
         bot, None,
-        on_reply=lambda text: None,
+        on_message=lambda text, answerable: None,
         get_offset=lambda: 0,
         set_offset=lambda v: None,
         is_active=lambda: True,

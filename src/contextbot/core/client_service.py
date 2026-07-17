@@ -19,11 +19,17 @@ from telethon import TelegramClient, events
 
 from ..config import Settings
 from ..handlers.base import DeferMessage, MessageKind
-from ..handlers.conversation import discard_incomplete, expire_stale, handle_reply, promote_next
+from ..handlers.conversation import (
+    bot_dm_status,
+    discard_incomplete,
+    expire_stale,
+    handle_reply,
+    promote_next,
+)
 from .health import HealthChecker, HealthReport
 from .hwm import HighWaterMark
 from .notifier import Notifier
-from .review_poller import ReviewPoller
+from .bot_dm_poller import BotDmPoller
 from .router import build_incoming_message, route
 from .security import is_saved_messages
 from .session_store import build_store
@@ -158,23 +164,29 @@ class ClientService:
 
     # ------------------------------------------------------------------- reviews
     def _sync_polling(self) -> None:
-        """Poll the bot DM exactly while a review is waiting on the owner.
+        """Poll the bot DM for as long as the app is up.
 
         Kept out of :class:`Notifier`, which stays send-only: capture reads Saved Messages over
-        Telethon and must never depend on the Bot API's 24h update retention. Only the review
-        conversation polls, and only for as long as one is open.
+        Telethon and must never depend on the Bot API's 24h update retention. Only the *conversation*
+        polls — which is what makes it safe to poll all the time, since the 24h limit cannot cost a
+        message that was never capture's to begin with.
+
+        **It used to run only while a review was open**, and talking to the bot at any other time was
+        a silent no-op. Silence is a terrible answer here: it reads the same whether the bot is
+        stopped, broken, or simply uninterested. Answering *without fail* while the app is up is what
+        makes silence say one thing instead of three.
         """
-        if not self._store.has_pending():
-            return
         if self._poller is None:
-            self._poller = ReviewPoller(
+            self._poller = BotDmPoller(
                 self._bot,
                 self._notifier.owner_chat_id if self._notifier else None,
-                on_reply=self._on_review_reply,
+                on_message=self._on_bot_dm,
                 on_tick=self._on_review_tick,
                 get_offset=lambda: self._store.update_offset,
                 set_offset=self._store.set_update_offset,
-                is_active=self._store.has_pending,
+                # The bot is up exactly as long as the client is connected — and `stop()`
+                # disconnects, so this needs no flag of its own to go stale.
+                is_active=self.is_connected,
                 review_started_at=self._review_started_at,
             )
         self._poller.start()
@@ -198,8 +210,13 @@ class ClientService:
         if reply and self._notifier is not None:
             await self._notifier.send(reply)
 
-    async def _on_review_reply(self, text: str) -> None:
-        """Feed one bot-DM reply into the open review and relay the outcome.
+    async def _on_bot_dm(self, text: str, answerable: bool) -> None:
+        """Answer one message the owner sent the bot. **Always answers.**
+
+        Into the open review when it can be (`answerable` — see the poller's backlog rule), and
+        otherwise with a mechanical status. There is no path out of here that says nothing, on
+        purpose: silence is the one reply the owner cannot interpret, and reserving it for "nothing
+        is running" is the only offline signal Telegram makes available.
 
         A review turn never raises :class:`DeferMessage` — see docs/PHASE2.md. There is no handler
         to replay, and halting would stop this very poller, so a usage limit here reports itself
@@ -209,9 +226,12 @@ class ClientService:
         if was_running:
             self._status.set(BotStatus.PROCESSING, "검토 반영 중…")
         try:
-            reply = await handle_reply(text, self._settings, store=self._store)
+            reply = await handle_reply(text, self._settings, store=self._store) if answerable else None
+            # None means no review acted on it — not that there is nothing to say.
+            if reply is None:
+                reply = bot_dm_status(self._store, stale=not answerable)
         except Exception as exc:  # noqa: BLE001 - a bad turn must not kill the poll loop
-            logger.exception("Review turn failed")
+            logger.exception("Bot-DM turn failed")
             reply = f"⚠️ 검토 처리 중 오류가 발생했습니다: {exc}"
         finally:
             if was_running and self._status.status == BotStatus.PROCESSING:

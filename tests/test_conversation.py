@@ -24,6 +24,7 @@ from contextbot.engine.claude_cli import (
 from contextbot.handlers.conversation import (
     QUESTIONS_HEADING,
     activate,
+    bot_dm_status,
     discard_incomplete,
     expire_stale,
     handle_reply,
@@ -935,3 +936,56 @@ async def test_promotion_skips_the_in_flight_one_and_takes_the_ready_one(store):
     assert "준비된 회의록" in reply
     assert store.pending().message_id == 9
     assert "뒤에" not in reply  # the in-flight one is not "waiting", it is unfinished
+
+
+# ------------------------------------- talking to the bot when no review wants it
+def test_the_status_reply_says_it_is_running_and_where_notes_go(store):
+    """Two jobs: prove the bot is alive, and point at the channel that actually captures. The bot
+    DM is not the capture channel, and a memo typed here would otherwise vanish."""
+    text = bot_dm_status(store)
+
+    assert "실행 중" in text
+    assert "검토 중인 초안이 없습니다" in text
+    assert "Saved Messages" in text
+
+
+def test_the_status_reply_names_the_draft_it_is_holding(store):
+    review = store.create(message_id=7, session_id="s", title="3분기 예산 회의", source_date=DATE)
+    review.write_draft("초안")
+    activate(review, store)
+
+    text = bot_dm_status(store)
+
+    assert "3분기 예산 회의" in text
+    assert "확인" in text and "취소" in text
+
+
+def test_a_stale_message_is_told_why_it_was_not_applied(store):
+    """A bare status here would look like the answer had been ignored — and the owner very likely
+    typed `확인` at a question they had not yet been shown."""
+    review = store.create(message_id=7, session_id="s", title="3분기 예산 회의", source_date=DATE)
+    review.write_draft("초안")
+    activate(review, store)
+
+    text = bot_dm_status(store, stale=True)
+
+    assert "반영하지 않았습니다" in text
+    assert "3분기 예산 회의" in text, "…and it still says what is actually waiting"
+
+
+def test_a_stale_message_with_no_review_is_just_a_status(store):
+    """Nothing to be late for: the review it would have predated does not exist."""
+    assert "반영하지 않았습니다" not in bot_dm_status(store, stale=True)
+
+
+def test_the_status_reply_carries_no_markdown(store):
+    """`Notifier.send` passes no parse_mode, so Telegram renders replies literally — `**bold**`
+    would arrive as asterisks. Turning parse_mode on would be worse than untidy: note filenames are
+    full of underscores, which Markdown reads as italics, and a parse error makes Telegram reject
+    the message — which Notifier *swallows*, so a confirmation would vanish rather than fail."""
+    review = store.create(message_id=7, session_id="s", title="회의", source_date=DATE)
+    review.write_draft("초안")
+    activate(review, store)
+
+    for text in (bot_dm_status(store), bot_dm_status(store, stale=True)):
+        assert "**" not in text, f"asterisks arrive as asterisks: {text!r}"

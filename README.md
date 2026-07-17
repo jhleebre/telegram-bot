@@ -53,6 +53,11 @@ client can read Saved Messages history, which removes the 24h limit entirely.
     right away, and you are asked about it when the first review ends. See below — **the Whisper
     model is a one-time download you have to run**.
 
+  The bot DM **answers everything you send it** while the app is running — a status, or your
+  review reply. Telegram has no way to reply for a bot that is switched off, so this is the next
+  best thing: **silence means it is not running.** (Nothing is lost meanwhile — Telegram queues
+  your message for 24h and the bot answers it on the next Start.)
+
   Notes are filed the way the rest of your vault is: **`YYMMDD-<분류>-<제목>.md`**. A recording is
   `회의`, a message or screenshot is `노트`, and a document is classified from its own content into
   one of `전략` / `기획` / `조사` / `안건` / `보고` / `초안`.

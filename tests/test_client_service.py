@@ -262,16 +262,34 @@ def _open_a_review(store, *, message_id=1, asked: bool = True):
     return review
 
 
-async def test_no_review_means_no_polling(settings, tmp_path):
-    """Capture reads Saved Messages over Telethon, so it must never depend on the Bot API's
-    24h update retention. Polling that ran all the time would blur that line."""
+async def test_the_bot_dm_is_polled_whenever_the_app_is_up(settings, tmp_path):
+    """It used to poll only while a review was open, which made talking to the bot at any other
+    time a silent no-op — and silence reads the same whether the bot is stopped, broken, or simply
+    uninterested. Answering without fail while the app is up is what reserves silence for the one
+    thing Telegram gives no other signal for: nothing is running.
+
+    Still safe for the reason it always was: the bot DM is **not** the capture channel, so the Bot
+    API's 24h retention cannot cost a message that was never capture's to begin with.
+    """
     svc, store = _with_store(settings, [text_message(1, "메모")], tmp_path)
 
     await svc.start()
 
-    assert svc._poller is None
-    assert svc._bot.update_calls == []
+    assert store.has_pending() is False   # nothing to review…
+    assert svc._poller is not None and svc._poller.is_running   # …and it is listening anyway
     await svc.stop()
+
+
+async def test_stopping_stops_the_polling(settings, tmp_path):
+    """`is_active` is the client's connection, so `stop()` disconnecting is what ends the loop —
+    no flag of its own to go stale."""
+    svc, store = _with_store(settings, [], tmp_path)
+    await svc.start()
+    assert svc._poller.is_running
+
+    await svc.stop()
+
+    assert not svc._poller.is_running
 
 
 async def test_a_started_review_turns_polling_on(settings, tmp_path, monkeypatch):
@@ -355,7 +373,6 @@ async def test_a_review_whose_first_turn_died_with_the_app_is_discarded_at_start
     await svc.start()
 
     assert store.has_pending() is False
-    assert svc._poller is None  # …and nothing is polling for it
     await svc.stop()
 
 
@@ -372,7 +389,7 @@ async def test_finishing_a_review_asks_about_the_next_one(settings, tmp_path):
     _open_a_review(store, message_id=2, asked=False)
     await svc.start()
 
-    await svc._on_review_reply("취소")
+    await svc._on_bot_dm("취소", True)
 
     assert store.pending().message_id == 2
     assert any("다음 회의록 차례" in text for _, text in svc._bot.sent)
@@ -380,14 +397,14 @@ async def test_finishing_a_review_asks_about_the_next_one(settings, tmp_path):
 
 
 async def test_polling_survives_the_handover_to_the_next_review(settings, tmp_path):
-    """The poll loop re-checks `is_active` the moment `_on_review_reply` returns, so promotion has
+    """The poll loop re-checks `is_active` the moment `_on_bot_dm` returns, so promotion has
     to happen *before* it does — otherwise the loop stops with a review still queued."""
     svc, store = _with_store(settings, [], tmp_path)
     _open_a_review(store, message_id=1)
     _open_a_review(store, message_id=2, asked=False)
     await svc.start()
 
-    await svc._on_review_reply("취소")
+    await svc._on_bot_dm("취소", True)
 
     assert svc._poller.is_running
     assert store.has_pending()
@@ -443,3 +460,72 @@ async def test_only_audio_is_acknowledged(settings, tmp_path):
 
     assert len(bot.sent) == 1
     assert "녹음을 받았습니다" not in bot.sent[0][1]
+
+
+# ------------------------------- the bot answers every message, without exception
+async def test_a_dm_with_no_review_open_gets_a_status_reply(settings, tmp_path):
+    """The silent no-op this replaces. Telegram has no offline autoresponder to borrow — a bot is a
+    token plus your code — so answering *without fail* while the app is up is the closest honest
+    substitute, and it is what makes silence mean "nothing is running" rather than one of three
+    indistinguishable things."""
+    svc, store = _with_store(settings, [], tmp_path)
+    await svc.start()
+
+    await svc._on_bot_dm("안녕?", True)
+
+    assert any("검토 중인 초안이 없습니다" in text for _, text in svc._bot.sent)
+    assert any("Saved Messages" in text for _, text in svc._bot.sent)
+    await svc.stop()
+
+
+async def test_a_dm_while_a_review_is_open_says_what_it_is_waiting_for(settings, tmp_path):
+    """Anything that is not 확인/취소/a correction still gets an answer — here, the one that tells
+    the owner what the bot is holding."""
+    svc, store = _with_store(settings, [], tmp_path)
+    _open_a_review(store, message_id=1)
+    await svc.start()
+    svc._bot.sent.clear()
+
+    await svc._on_bot_dm("얼마나 걸려?", True)
+
+    # It went through handle_reply (a revision), so it is the review that answered — not a status.
+    assert svc._bot.sent, "every message gets an answer"
+    await svc.stop()
+
+
+async def test_a_stale_dm_is_answered_and_says_why_it_was_not_applied(settings, tmp_path):
+    """The sharp case, and the reason the poller reports the backlog rule instead of acting on it.
+
+    App off → owner types `확인` → app starts and opens a review during catch-up → the message
+    arrives predating it. Applying it would accept a draft they never saw; dropping it silently
+    would rebuild the very silence this feature removes. So: answered, and told why.
+    """
+    svc, store = _with_store(settings, [], tmp_path)
+    _open_a_review(store, message_id=1)
+    await svc.start()
+    svc._bot.sent.clear()
+
+    await svc._on_bot_dm("확인", False)
+
+    assert len(store.all_reviews()) == 1, "it must not have accepted the draft"
+    assert not list(settings.inbox_dir.iterdir()), "…and must not have written the note"
+    text = svc._bot.sent[-1][1]
+    assert "반영하지 않았습니다" in text
+    await svc.stop()
+
+
+async def test_a_failing_turn_still_answers(settings, tmp_path, monkeypatch):
+    """No path out of here may say nothing — silence is the one reply the owner cannot read."""
+    svc, store = _with_store(settings, [], tmp_path)
+    _open_a_review(store, message_id=1)
+    await svc.start()
+    svc._bot.sent.clear()
+
+    async def boom(*a, **k):
+        raise RuntimeError("engine on fire")
+
+    monkeypatch.setattr(cs, "handle_reply", boom)
+    await svc._on_bot_dm("고쳐주세요", True)
+
+    assert "engine on fire" in svc._bot.sent[-1][1]
+    await svc.stop()
