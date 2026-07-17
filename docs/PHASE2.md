@@ -12,9 +12,9 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > *Usage-limit policy* (binding on every pipeline) → *Writing Markdown: ranges take a hyphen*
 > (binding on every prompt) → *The resume contract* (measured; it rules out the staging pattern
 > increments 2–3 use) → *Increment 4 (as built)* (the review state machine) → *The decisions,
-> settled* → *Increment 5 (as built)* (audio, the queue, and the two silent bugs only real runs
-> found).
-> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **600 passing**, no network or model runs.
+> settled* → *Increment 5 (as built)* (audio, the queue, the bugs only real runs found, and the
+> window).
+> Suite: `QT_QPA_PLATFORM=offscreen .venv/bin/pytest` — **636 passing**, no network or model runs.
 >
 > **Phase 2 is complete.** Every pipeline in *Scope* is shipped and owner-verified. The one thing
 > deliberately left open is **open decision 6** (should the bot DM answer when nobody asked it
@@ -22,11 +22,17 @@ handlers from Phase 1 mean Phase 2 mostly fills in handler bodies and adds a few
 > **text has no interactive path today**: a Saved Messages memo is always a quick note, which is the
 > owner's stated model. That was a decision, not a side effect — see the decision itself.
 >
-> **Three lessons, one shape, four increments.** *Read the consumer's source; the model would rather
-> answer than admit it cannot see; the review loop's failures are silent.* Increment 5 hit all three
-> again: the vault (not this doc) knew the note type, `mlx_whisper`'s source (not its docs) knew
-> about the network call and the hardcoded `ffmpeg`, and both of its own bugs were silent. Assume a
-> sixth increment would meet them a fifth time.
+> **Three lessons, one shape, five increments.** *Read the consumer's source; the model would rather
+> answer than admit it cannot see; the failures here are silent.* Increment 5 hit all three again:
+> the vault (not this doc) knew the note type **and** the filename convention, `mlx_whisper`'s source
+> (not its docs) knew about the network call and the hardcoded `ffmpeg`, and not one of its own
+> seven bugs raised anything. Assume a sixth increment would meet them a sixth time.
+>
+> **And a fourth, earned by the window:** *a constant that overrides what a system already knows
+> will not fail loudly — it will quietly produce something almost right.* A minimum size below what
+> the layout needs clips the content instead of shrinking the window; a health check fired before
+> the client connects reports a login failure instead of "not yet". Both looked like the code was
+> working.
 
 **Ingestion recap (from the Phase 1 hybrid):** input files arrive via **Saved Messages** (Telethon)
 and are downloaded to a temp dir with `message.download_media(...)`. The **review conversation runs
@@ -292,6 +298,12 @@ src/contextbot/
 │                           #    ✅ increment 5 — + activate/promote_next, and accept's side effects
 ├── stt/                    # ✅ increment 5 — ported from meeting-transcriber, not imported from it
 │   └── whisper.py          # transcribe() + model presence; ffmpeg put on PATH, not just resolved
+├── ui/                     # ✅ Phase 1, rebuilt by increment 5 into a compact status bar
+│   ├── main_window.py      #    one row, expanding to HEALTH + ACTIVITY (was 533x620 of card)
+│   ├── icon_buttons.py     # ✅ increment 5 — play/stop + chevron, painted (a font is not a shape lib)
+│   ├── elided_label.py     # ✅ increment 5 — a QLabel that ends in `…` instead of clipping
+│   └── bot_worker.py       #    Qt thread ↔ asyncio loop; asks for health when start() resolves
+│                           #    (status_widget.py deleted with the pulsing status face)
 └── files/                  # ✅ built in increments 2–3
     ├── originals.py        # original-file policy (Downloads / delete / keep-and-embed)
     ├── images.py           # ✅ increment 3 — heic/bmp → PNG, so the model actually *sees* it
@@ -1237,7 +1249,7 @@ Delivered: `stt/whisper.py` (the port) + `scripts/download_model.py`, `files/glo
 `meeting_glossary.md`, the queue in `core/session_store.py` (`ReviewState.QUEUED`, `note_type`,
 `tags`), `conversation.activate` / `promote_next` / `_accept`, the `whisper-stt` and `glossary`
 health probes, five settings, the vault's **filename convention** across every route, and the
-**deletion of the `#검토` scaffolding**. Suite: 474 → **600**
+**deletion of the `#검토` scaffolding**, and the **window** the new probes broke. Suite: 474 → **636**
 (it peaked at 601 and *drops* here, because the scaffolding's ~28 tests went with their subject).
 
 **The decisions above all held.** What follows is what building it changed or found.
@@ -1342,6 +1354,53 @@ exists to prevent, reintroduced by the machinery meant to prevent them"*). That 
 across two increments** found by reading the diff or looking at the app, rather than by running the
 suite. Budget for it. **And note what caught the third: a screenshot.** Every probe added to
 `health.py` is a line in a fixed-size panel, and nothing in the suite had ever looked at it.
+
+#### The window — where adding two probes led, and it was further than expected
+
+The clipping above was the first pull on a thread. `health.py` gained two probes; the window had
+been built for four; and the owner then reviewed the surface rather than just the bug. The result is
+a **compact status bar** — one row (round start/stop button, a line of text, a health light) that
+expands to the HEALTH and ACTIVITY cards on demand. **440×72, from 533×620.**
+
+`ui/status_widget.py` is gone: it drew a big status "face" that *pulsed on a loop while the bot
+worked* — the app blinked at the owner for as long as it was doing its job — and the face, a bold
+status name and a tagline were three ways of saying one thing. With the face removed it was a label
+with a fallback rule, so the window took that over. `elided_label.py` and `icon_buttons.py` are new.
+
+**Four more bugs, and their shape is worth carrying forward, because none of them raised.**
+
+1. **A constant overriding what the layout already knew — three times.** `setMinimumSize(420, 620)`
+   when the panel needed 768; then `setMinimumWidth(460)` when the row needed 592; and
+   `ElidedLabel` forcing `Ignored` horizontally, which a *stretchy* label needs but a caller's
+   `setFixedWidth` cannot survive — `setFixedWidth` pins min/max but not the policy, so the layout
+   sized the health column as zero-width, gave its space away, and drew the label at its real 150px
+   over the neighbour it had just placed. **A minimum below what the content needs does not shrink
+   the window; it lets Qt squeeze the children past their own minimums and clip them.** The window
+   now sets no explicit minimum in either direction.
+2. **Health was asked before the bot existed.** `start_bot` only *queues* `start()` on the loop, and
+   the click asked for health on the very next line — so the check ran against an unconnected client
+   and answered `telethon-auth: not logged in (run login.py)`. Red, alarming, and false on a machine
+   that is logged in fine, until the 15s timer happened to re-check. The worker asks when the
+   starting sequence resolves, which is the first moment a check can tell the truth.
+3. **…and kept asserting health after it stopped.** A green light on a stopped bot is a claim nobody
+   is standing behind, and it would go on making it all night while the CLI's login quietly expired.
+   Grey on stop — plus dropping a check that was already in flight, which otherwise lit the bot back
+   up green a moment after it was told to stop.
+4. **Two glyphs pretending to be one shape.** `⌄` and `⌃` are different characters (U+2304, U+2303):
+   different weights, sizes and baselines, so the chevron changed shape and jumped as the panel
+   opened — which is what read as "misaligned". Both buttons are painted now, the chevron drawn once
+   and the painter rotated 180°, so up and down are one shape by construction. **A font is not a
+   shape library**, and the text-presentation variation selector `▶︎` had needed to stop macOS
+   rendering it as colour emoji was that bug admitting itself.
+
+(2) and (3) are the same bug from opposite sides — *invent a failure that is not there* and *assert
+a success you have stopped checking* — and both defeat the panel's entire purpose. **A probe is only
+worth reading if it is green exactly when green is true.**
+
+`test_ui_smoke.py` went from 3 tests to 27, and most of what it now asserts is *layout*, which is
+unusual and earned. It also turned up a green suite that was partly green because it was not there:
+**seven test names were duplicated**, and Python keeps only the last definition, so the earlier
+copies had silently never run. They came from appending blocks to the file instead of editing it.
 
 #### The filename convention — the vault's, and the third time reading it beat guessing
 
@@ -1697,5 +1756,7 @@ means; `test_client_service.py` the promotion wiring; `test_health.py` the `whis
 caught and the suite could not). **`mlx_whisper` is faked at the import site and `conftest.fake_stt` is required
 by any test that routes audio** — without it a test that merely proves *dispatch* would load 1.5GB
 of weights, and the `whisper-stt` probe is pinned so a green suite never means "the owner happens to
-have the model on disk". Suite: 474 → 601, then **579** once the `#검토` tests were deleted with
-their subject (573) and the self-review bugs were covered.
+have the model on disk". `test_ui_smoke.py` grew from 3 tests to 27 and `test_bot_worker.py` is new
+— the window is where this increment's last four bugs were, and every one was a layout constant or a
+race that raised nothing. Suite: 474 → 601, then **636**: the `#검토` tests went with their subject
+(573), and the rest is the audio pipeline's own edges plus the window's.

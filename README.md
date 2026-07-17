@@ -118,6 +118,14 @@ inside the vault: private, backed up with the rest of your notes, and hidden fro
 skips dotfolders) so it is not a note. It grows on its own — when you correct a name during a
 review, that correction is filed. No glossary is fine; you just get no term corrections.
 
+**Long meetings are fine, and slow is normal.** A real ~1-hour meeting measures about 13 minutes end
+to end — 5 of Whisper, 7 of drafting — and the bot tells you it got the recording, then goes quiet
+until the draft is ready. The drafting budget (`CLAUDE_MEETING_TIMEOUT_SEC`, default 1 hour) is a
+*hang detector*, not a schedule: being generous costs nothing, and being tight would throw the whole
+transcription away at the last step. One reviewed meeting costs roughly $1 of *plan usage* (not
+money — see above), and each further correction ~$0.40, because the revise turn re-reads the
+transcript.
+
 ### One-time login (you run this yourself)
 
 ```bash
@@ -139,8 +147,10 @@ you enter your own credentials.)
 The window opens as one row: a green **▶** button, and the line `잠자는 중 — Start를 눌러
 깨워주세요`. Click it; the button turns into a red **■** and the row says what the bot is doing.
 
-The dot on the right is the **health light** — green is fine, amber and red mean expand. Hovering it
-names the probe (`🟡 whisper-stt`); `⌄` shows all seven and the activity log, `⌃` shrinks back.
+The dot on the right is the **health light**: green is fine, amber and red mean expand, and grey
+means nobody is checking (stopped, or not checked yet — it is never green on a bot that is not
+running). Hovering it names the probe (`🟡 whisper-stt`); `⌄` shows all seven and the activity log,
+`⌃` shrinks back.
 
 Most failures are **degraded, not error**: a missing `claude` CLI still captures notes (just without
 LLM titles/tags), and a missing Whisper model only stops audio. The **claude-engine** probe shows the
@@ -185,10 +195,13 @@ src/contextbot/
 ├── logging_setup.py      # file + in-memory (UI) logging
 ├── core/
 │   ├── client_service.py # Telethon input (catch-up + live) + dispatch + bot reply
+│   ├── session_store.py  # the pending review: draft, resume handle, work dir, queue
+│   ├── review_poller.py  # bot-DM polling, only while a review is open
 │   ├── notifier.py       # send-only bot → owner DM
 │   ├── hwm.py            # high-water-mark (last processed Saved Messages id)
 │   ├── router.py         # classify + route → handlers
-│   ├── health.py         # auth / bot-token / inbox / connection probes
+│   ├── health.py         # 7 probes: auth / bot-token / inbox / connection /
+│   │                     #   claude-engine / whisper-stt / glossary
 │   ├── security.py       # Saved-Messages self-peer guard
 │   └── status.py         # observable status model
 ├── engine/
@@ -198,8 +211,8 @@ src/contextbot/
 ├── handlers/             # text / document / image / audio handlers + the review conversation
 ├── stt/                  # local speech-to-text (mlx-whisper), ported in — no external project
 ├── files/                # original-file policy (→ Downloads), encoding / CSV, images, glossary
-├── notes/                # frontmatter, filename, atomic markdown writer
-└── ui/                   # PySide6 window + asyncio worker thread
+├── notes/                # frontmatter, filename (YYMMDD-<분류>-slug), atomic writer
+└── ui/                   # compact status bar + asyncio worker thread
 login.py                  # one-time interactive login (user-run)
 run.py                    # app entrypoint
 scripts/                  # build_app.sh (Dock .app bundle), make_icon.py, download_model.py

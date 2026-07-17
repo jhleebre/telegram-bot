@@ -4,6 +4,20 @@ Phase 1 delivers a personal, single-user capture tool wrapped in a small PySide6
 health checks and **text → Markdown note** saving. Audio/image/document handling is stubbed with a
 "Phase 2 예정" reply. Everything except pixel-drawing is unit-tested.
 
+> **This is Phase 1's record, and Phase 2 has moved some of it.** Kept as the *why*; where it and
+> the code disagree, the code is right and `PHASE2.md` says how it got that way. The deltas worth
+> knowing before using this as a map:
+>
+> - **Nothing is stubbed.** Audio, image and document handlers are all real (Phase 2, increments
+>   2-5), so the "Phase 2 예정" reply is gone.
+> - **The window is a compact status bar, not a card dashboard.** `ui/status_widget.py` no longer
+>   exists: the big pulsing status "face" it drew was the only reason it did, and both went in
+>   increment 5. One row — a round start/stop button, a line of text, a health light — that expands
+>   to the health panel and the log.
+> - **Notes are named `YYMMDD-<분류>-<slug>.md`**, the vault's own convention, not `YYMMDD-HHMM-`.
+> - **Health has seven probes**, not four: `claude-engine` (increment 2), `whisper-stt` and
+>   `glossary` (increment 5) joined.
+
 ## Goals
 
 - **Single user only** — input is read from the owner's own **Saved Messages**; only the owner can
@@ -13,7 +27,8 @@ health checks and **text → Markdown note** saving. Audio/image/document handli
 - **Survive weekends** — Saved Messages is durable and history-readable, so messages sent while the
   app was closed are processed on the next Start (no 24h Bot-API limit).
 - **Graphical status** — a colored light + label (STOPPED / STARTING / RUNNING / PROCESSING /
-  ERROR), a health panel, and a live log view.
+  ERROR), a health panel, and a live log view. *(Phase 2 kept the states and rebuilt the surface:
+  one collapsed row, expanding to the panel and the log.)*
 - **Text memo → Markdown** — saved to `~/Documents/MarkNotes/0_inbox/` with YAML frontmatter; a
   confirmation is sent to the owner's **bot DM**.
 
@@ -46,12 +61,12 @@ Saved Messages ──Telethon(user)──▶ catch-up + live ──▶ route()/h
 | `core/notifier.py` | Send-only bot wrapper → owner DM. |
 | `core/hwm.py` | `HighWaterMark` — persist last processed Saved Messages id (`state/hwm.json`); `baseline()` for first run. |
 | `core/router.py` | `classify_document`, `build_incoming_message` (Telethon adapter), `route` dispatch via `ROUTING_TABLE`. |
-| `core/health.py` | `HealthChecker.check()` → telethon-auth / bot-token / inbox / connection probes → ERROR/DEGRADED/HEALTHY. |
+| `core/health.py` | `HealthChecker.check()` → telethon-auth / bot-token / inbox / connection probes → ERROR/DEGRADED/HEALTHY. *(Phase 2 added claude-engine, whisper-stt, glossary, and the report's `summary()`/`as_html()` renderings.)* |
 | `core/security.py` | `is_saved_messages(peer_id, my_id)` self-peer guard. |
-| `core/status.py` | `BotStatus` enum, color/label/emoji/tagline maps, observable `StatusModel`. |
-| `handlers/*` | `text_handler` (real), audio/image/document stubs; `base.py` (`IncomingMessage` with `raw` Telethon ref for Phase 2). |
-| `notes/*` | `frontmatter` (PyYAML), `naming` (`YYMMDD-HHMM-slug.md` + collision suffix), `markdown_writer` (atomic write). |
-| `ui/*` | `bot_worker`, `status_widget`, `main_window`, `app`; `run.py`; `login.py`. |
+| `core/status.py` | `BotStatus` enum, color/label/emoji/tagline maps, observable `StatusModel`. *(Phase 2: the emoji map went with the status face; only the tagline is rendered now.)* |
+| `handlers/*` | `text_handler` (real), audio/image/document stubs; `base.py` (`IncomingMessage` with `raw` Telethon ref for Phase 2). *(Phase 2 filled in all three, and added `conversation.py` + `downloads.py`.)* |
+| `notes/*` | `frontmatter` (PyYAML), `naming` (`YYMMDD-HHMM-slug.md` + collision suffix), `markdown_writer` (atomic write). *(Phase 2: the name is `YYMMDD-<분류>-slug.md`, matching the vault — the clock is gone and the collision suffix now earns its keep.)* |
+| `ui/*` | `bot_worker`, `status_widget`, `main_window`, `app`; `run.py`; `login.py`. *(Phase 2: `status_widget` deleted with the face; `elided_label` + `icon_buttons` added.)* |
 
 ## Desktop app & Dock launcher
 
@@ -60,6 +75,12 @@ Saved Messages ──Telethon(user)──▶ catch-up + live ──▶ route()/h
   Korean tagline, a prominent green **Start** / red **Stop** button, and HEALTH + ACTIVITY cards.
   Styling is self-contained QSS with the `Fusion` style for consistent rendering across system
   themes. There is no in-window title header (the OS title bar carries the name).
+
+  **Superseded in Phase 2 (increment 5).** The face, the status name and the tagline were three ways
+  of saying one thing, and the disc pulsed for as long as the bot was working — the app blinked at
+  the owner while doing its job. It is now one collapsed row (round start/stop button, the tagline,
+  a health light) that expands to the HEALTH and ACTIVITY cards on demand. The QSS is still
+  self-contained; the buttons are painted rather than typed, because a font is not a shape library.
 - **Dock launcher** (`scripts/make_icon.py`, `scripts/build_app.sh`): `build_app.sh` renders a
   robot-emoji icon (PySide6 → PNG → `.icns` via `sips`/`iconutil`) and assembles a
   `Context Bot.app` bundle whose launcher runs the project's `.venv` Python + `run.py`. The owner
