@@ -52,6 +52,16 @@ class IncomingMessage:
     date: datetime
     kind: MessageKind
     text: str = ""
+    # What the owner typed *alongside* an attachment. Telegram allows one on every media message —
+    # photo, video, audio, voice note, animation, and any document — so this is populated for every
+    # media kind, not just images. A plain text message has no caption: the text *is* the message.
+    #
+    # Telethon does not separate the two — a media message's `raw_text` **is** its caption — so the
+    # split happens in the router. It is worth keeping separate all the same, because the two are
+    # not the same kind of thing: `text` for a memo is the note's content, while a caption is the
+    # owner talking *about* the file. Handlers act on it as intent (see prompts/caption.md); they
+    # do not paste it into the note.
+    caption: str = ""
     file_name: Optional[str] = None
     mime_type: Optional[str] = None
     # The underlying Telethon message, kept for Phase 2 media downloads (download_media).

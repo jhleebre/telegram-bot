@@ -239,6 +239,13 @@ def _write(review: PendingReview, settings: Settings, *, unreviewed: str | None 
             f"> ⚠️ 검토를 마치지 못한 초안입니다 — {unreviewed}\n"
             f"> 내용을 그대로 확인해주세요.\n\n{body}"
         )
+    extra: dict[str, object] = {
+        "telegram_message_id": review.message_id,
+        "reviewed": unreviewed is None,
+    }
+    # The draft already acted on it; this keeps the owner's own words, which acting on them spent.
+    if review.caption:
+        extra["caption"] = review.caption
     return write_note(
         inbox_dir=settings.inbox_dir,
         body=body,
@@ -248,7 +255,7 @@ def _write(review: PendingReview, settings: Settings, *, unreviewed: str | None 
         category=review.category,
         note_type=review.note_type,
         tags=review.tags,
-        extra={"telegram_message_id": review.message_id, "reviewed": unreviewed is None},
+        extra=extra,
         slug_source=review.title,
     )
 

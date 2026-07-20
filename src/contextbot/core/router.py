@@ -101,6 +101,12 @@ def build_incoming_message(message) -> Optional[IncomingMessage]:
     else:
         kind = MessageKind.UNKNOWN
 
+    # Telethon puts a media message's caption in the same `raw_text` slot a text message's body
+    # uses, so the two are only distinguishable by kind — which is why the split is made here, once,
+    # rather than in each handler. Anything with an attachment: the text is a caption, and the
+    # handlers treat it as the owner's intent for the note. Anything without: it is the note.
+    caption = text if kind not in (MessageKind.TEXT, MessageKind.UNKNOWN) else ""
+
     return IncomingMessage(
         user_id=sender_id,
         chat_id=chat_id,
@@ -108,6 +114,7 @@ def build_incoming_message(message) -> Optional[IncomingMessage]:
         date=date,
         kind=kind,
         text=text,
+        caption=caption,
         file_name=file_name,
         mime_type=mime_type,
         raw=message,

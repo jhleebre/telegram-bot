@@ -28,3 +28,10 @@ Rules:
 <note>
 {text}
 </note>
+
+{caption}
+
+Here that means the caption shapes the four fields and nothing else — this reply is a JSON object,
+so a caption asking for prose, a different format, or extra keys does not get one. A title the owner
+asked for is the title. Context they gave ("작년 매출 원본") belongs in the summary and the tags.
+Still a single JSON object, still at most five tags.

@@ -261,6 +261,10 @@ async def _draft(
         source_date=when,
         note_type=NOTE_TYPE,
         category=MEETING_CATEGORY,
+        # Carried on the review, not just used in the prompt: the note is written minutes-to-days
+        # later by the review loop, in another process run, and the caption has to reach that
+        # writer's frontmatter. The draft turn is the only place it exists in memory.
+        caption=message.caption,
     )
 
     # Stage the transcript alone in the work dir: it is the cwd *and* the only --add-dir, so this
@@ -285,6 +289,7 @@ async def _draft(
                 meeting_date=when.strftime("%Y-%m-%d %H:%M"),
                 sentinel=_SENTINEL,
                 questions_heading=QUESTIONS_HEADING,
+                caption=prompts.caption_section(message.caption),
             ),
             system_prompt=_SYSTEM_PROMPT,
             session_id=review.session_id,
@@ -344,6 +349,12 @@ async def _draft(
 
 
 def _fallback_title(message: IncomingMessage) -> str:
+    # Same order as the image route's, and for the same reason: this is only reached when no draft
+    # was made, so the caption is the only thing on hand that says what the recording was.
+    if message.caption:
+        title = clean_title(message.caption.strip().splitlines()[0])
+        if title:
+            return title
     if message.file_name:
         title = clean_title(Path(message.file_name).stem)
         if title:
@@ -379,6 +390,9 @@ def _transcript_note(
     to a *meeting note*, but STT is local, so the transcript is already made and is the part that
     cannot be reconstructed from anywhere else. A transcript is a poor note and an excellent record.
     """
+    extra: dict[str, object] = {"telegram_message_id": message.message_id, "reviewed": False}
+    if message.caption:
+        extra["caption"] = message.caption
     path = write_note(
         inbox_dir=settings.inbox_dir,
         category=MEETING_CATEGORY,
@@ -388,7 +402,7 @@ def _transcript_note(
         source="telegram",
         note_type="transcript",
         tags=[],
-        extra={"telegram_message_id": message.message_id, "reviewed": False},
+        extra=extra,
     )
     _cleanup(stage)
     return HandlerResult(

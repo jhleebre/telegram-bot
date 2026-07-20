@@ -104,12 +104,23 @@ def _split_title(text: str) -> tuple[str | None, str]:
 
 
 def _title_for(message: IncomingMessage, model_title: str | None) -> str:
-    """The model's title, else the filename, else a default.
+    """The model's title, else the caption, else the filename, else a default.
 
     A photo's filename is usually noise (``IMG_4821``), so the model wins when it gave a title.
+
+    The caption sits second, and only reaches here on the stub-note path — no model ran, so nothing
+    looked at the picture and the alternative is `IMG_4821` or the bare word 이미지. The owner's own
+    words about the image beat both, even when they were phrased as an instruction rather than a
+    label: "영수증 정리해줘" is a worse title than the model would have written and a much better one
+    than `IMG_4821`, because it is the only thing on the note that says what the image was.
     """
     if model_title:
         return model_title
+    if message.caption:
+        # First line only: a multi-line caption is a paragraph, and a title is a label.
+        title = clean_title(message.caption.strip().splitlines()[0])
+        if title:
+            return title
     if message.file_name:
         title = clean_title(Path(message.file_name).stem)
         if title:
@@ -137,14 +148,19 @@ def _undelivered_reply(name: str, reason: str, moved: Path) -> str:
 
 
 async def _describe(
-    image: Path, settings: Settings, *, engine: ClaudeCLI | None, stage: Path
+    image: Path, settings: Settings, *, engine: ClaudeCLI | None, stage: Path, caption: str = ""
 ) -> tuple[str | None, str]:
     """Run the one-shot VLM call; return (title, description).
 
     Raises ClaudeUsageLimit (defer) or ClaudeError (degrade to a stub note).
     """
     engine = engine or build_engine(settings)
-    prompt = prompts.render("image_describe", path=str(image), sentinel=_SENTINEL)
+    prompt = prompts.render(
+        "image_describe",
+        path=str(image),
+        sentinel=_SENTINEL,
+        caption=prompts.caption_section(caption),
+    )
     result = await engine.run(
         prompt,
         system_prompt=_SYSTEM_PROMPT,
@@ -207,7 +223,7 @@ async def handle_image(
         model_title: str | None = None
         try:
             model_title, description = await _describe(
-                readable, settings, engine=engine, stage=stage
+                readable, settings, engine=engine, stage=stage, caption=message.caption
             )
             reason: str | None = None
         except ClaudeUsageLimit as exc:
@@ -254,6 +270,10 @@ def _write(
     # the temp file we invented for it would say nothing.
     if message.file_name:
         extra["original_file"] = message.file_name
+    # Acting on a caption is lossy — it went into the description's wording rather than staying a
+    # sentence. This is where the owner's own words survive.
+    if message.caption:
+        extra["caption"] = message.caption
 
     path = write_note(
         inbox_dir=settings.inbox_dir,

@@ -4,14 +4,14 @@ from contextbot.engine import prompts
 
 
 def test_render_substitutes_text():
-    out = prompts.render("text_enrich", text="회의 준비하기")
+    out = prompts.render("text_enrich", text="회의 준비하기", caption="")
     assert "회의 준비하기" in out
     assert "{text}" not in out
 
 
 def test_render_keeps_literal_json_braces():
     """The JSON shape example must survive str.format (doubled braces in the template)."""
-    out = prompts.render("text_enrich", text="x")
+    out = prompts.render("text_enrich", text="x", caption="")
     assert '{"title": "...", "tags": ["...", "..."], "summary": "...", "category": "..."}' in out
 
 
@@ -34,7 +34,7 @@ def test_pdf_template_asks_for_the_category_line():
 
 def test_pdf_template_carries_the_path_and_sentinel():
     out = prompts.render(
-        "pdf_to_markdown", path="/tmp/stage/report.pdf", sentinel="CONVERSION_FAILED"
+        "pdf_to_markdown", path="/tmp/stage/report.pdf", sentinel="CONVERSION_FAILED", caption=""
     )
     assert "/tmp/stage/report.pdf" in out
     assert "CONVERSION_FAILED" in out
@@ -43,14 +43,19 @@ def test_pdf_template_carries_the_path_and_sentinel():
 
 def test_pdf_template_forbids_substituting_another_source():
     """The fabrication guard is the prompt's job; the sentinel check is only the backstop."""
-    out = prompts.render("pdf_to_markdown", path="/x.pdf", sentinel="S")
+    out = prompts.render("pdf_to_markdown", path="/x.pdf", sentinel="S", caption="")
     assert "only file in its directory" in out
     assert "fall back to any other file" in out
     assert "never reconstruct the content from your own" in out
 
 
 def test_image_template_carries_the_path_and_sentinel():
-    out = prompts.render("image_describe", path="/tmp/stage/shot.png", sentinel="DESCRIPTION_FAILED")
+    out = prompts.render(
+        "image_describe",
+        path="/tmp/stage/shot.png",
+        sentinel="DESCRIPTION_FAILED",
+        caption="",
+    )
     assert "/tmp/stage/shot.png" in out
     assert "DESCRIPTION_FAILED" in out
     assert "{" not in out and "}" not in out
@@ -71,6 +76,8 @@ def _values(name: str) -> dict:
         "transcript_path": "/stage/transcript.txt",
         "glossary": "용어집 안내",
         "meeting_date": "2026-07-16 14:30",
+        # The no-caption rendering, which is what every template must still read correctly as.
+        "caption": "",
     }
 
 
@@ -121,6 +128,7 @@ def test_meeting_template_carries_the_transcript_and_the_structure():
         meeting_date="2026-07-16 14:30",
         sentinel="DRAFT_FAILED",
         questions_heading="## 확인 요청",
+        caption="",
     )
     assert "/stage/work/transcript.txt" in out
     assert "용어집: /vault/glossary.md" in out

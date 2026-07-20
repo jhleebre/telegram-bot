@@ -53,6 +53,21 @@ client can read Saved Messages history, which removes the 24h limit entirely.
     right away, and you are asked about it when the first review ends. See below — **the Whisper
     model is a one-time download you have to run**.
 
+  **Type a caption with any attachment and it steers the note.** Telegram lets you add one to
+  every kind of media — photo, recording, voice note, PDF, `.txt`, `.csv` — and the bot reads it as
+  *you talking to it*, not as text to file. So it acts on what you wrote rather than pasting it in:
+  "핵심만 짧게" shortens the note, "참석자는 김철수, 이영희" fills the meeting note's Overview and
+  stops it asking you who was there, "작년 버전이라 숫자는 옛날 것" ends up as context in the note
+  itself. Facts you supply beat the bot's guesses from the file. Your exact words are kept in the
+  note's `caption:` frontmatter, since acting on them means they do not survive in the body.
+
+  Two limits worth knowing. A caption **cannot** make the bot claim it read something it could not,
+  skip a required section, or — on a PDF — replace the conversion with a summary: ask for one and
+  you get a `## 요약` section *added* above the full document, because the original goes to
+  `~/Downloads` and the note is the only searchable copy. And a sent **`.md` ignores its caption**:
+  that route saves your file byte-for-byte and runs no model, so there is nothing to act with and
+  nothing that may edit your bytes.
+
   The bot DM **answers everything you send it** while the app is running — a status, or your
   review reply. Telegram has no way to reply for a bot that is switched off, so this is the next
   best thing: **silence means it is not running.** (Nothing is lost meanwhile — Telegram queues

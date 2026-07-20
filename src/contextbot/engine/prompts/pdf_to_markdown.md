@@ -10,6 +10,8 @@ or image-heavy document is expected to take several turns — that is normal, no
 going until the whole document is converted. Do not stop early, and do not decide the document is
 too large or too complex to handle.
 
+{caption}
+
 Then output the document's content as Markdown and nothing else — no preamble, no closing remarks,
 and no code fence around the document as a whole:
 
@@ -23,7 +25,13 @@ and no code fence around the document as a whole:
 - Then a single `#` heading naming the document. Use the document's own title if it has one.
 - Reflect the document's structure with `##`/`###` headings, lists, and tables.
 - Transcribe the text faithfully. Do not summarize, condense, or rewrite it, and keep numbers,
-  dates, and names exactly as they appear. Keep the document's own language.
+  dates, and names exactly as they appear. Keep the document's own language. **This survives the
+  owner's note above**: converting the document is what this route is for, and a note that replaced
+  it with a summary would have quietly thrown the document away with nothing left to recover it
+  from. So when the note asks for a summary, an opinion, or "핵심만", give them that as a short
+  `## 요약` section placed *after* the `분류:` line and the `#` heading and *before* the document
+  itself — then transcribe the document in full underneath, as always. Add to the conversion; never
+  substitute for it.
 - **Ranges use a hyphen, never a tilde** — write `1분기-3분기`, `10-20명`, `2026-2027년`, even when
   the document itself uses `~`. In Markdown `~` is a strikethrough delimiter: two of them in the
   same paragraph, table cell, or list item pair up, and everything between them is struck through

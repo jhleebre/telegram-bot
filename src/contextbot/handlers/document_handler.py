@@ -98,6 +98,13 @@ async def _handle_markdown(message: IncomingMessage, settings: Settings) -> Hand
     The content is untouched (frontmatter included, if it has any). Only the filename is
     normalized to the vault's ``YYMMDD-<분류>-<slug>.md`` convention, so a sent note sorts into the
     inbox alongside the ones the bot writes.
+
+    **This is the one route a caption cannot reach**, and deliberately so. Acting on one takes a
+    model, and this route calls none — the file *is* the note, saved byte-for-byte. Honouring a
+    caption here would mean either rewriting the owner's own file (the thing this route exists not
+    to do) or appending their words to it, which is the verbatim-paste every other route is told to
+    avoid. So a caption on a `.md` is silently ignored, and even the frontmatter is left alone,
+    because these bytes are the owner's and this route does not edit them.
     """
     with tempfile.TemporaryDirectory(prefix="contextbot-md-") as tmp:
         src = await _download(message, Path(tmp))
@@ -174,13 +181,15 @@ async def _handle_text_like(
         # Metadata only — the body above is already final and the model never rewrites it.
         # Before any side effect: this may raise DeferMessage.
         enrichment, degraded = await enrich_or_fallback(
-            body, settings, engine=engine, message_id=message.message_id
+            body, settings, engine=engine, message_id=message.message_id, caption=message.caption
         )
 
         extra: dict[str, object] = {
             "telegram_message_id": message.message_id,
             "original_file": src.name,
         }
+        if message.caption:
+            extra["caption"] = message.caption
         if enrichment and enrichment.summary:
             extra["summary"] = enrichment.summary
 
@@ -275,7 +284,12 @@ async def _handle_pdf(
         stage = Path(tmp)
         src = await _download(message, stage)  # the only file in `stage`
         engine = engine or build_engine(settings)
-        prompt = prompts.render("pdf_to_markdown", path=str(src), sentinel=_SENTINEL)
+        prompt = prompts.render(
+            "pdf_to_markdown",
+            path=str(src),
+            sentinel=_SENTINEL,
+            caption=prompts.caption_section(message.caption),
+        )
         timeout = max(settings.claude_timeout_sec, _PDF_MIN_TIMEOUT_SEC)
 
         body: str | None = None
@@ -318,6 +332,15 @@ async def _handle_pdf(
 
         category, body = _split_category(body)
         title = _title_from_markdown(body, src.stem)
+        extra: dict[str, object] = {
+            "telegram_message_id": message.message_id,
+            "original_file": src.name,
+        }
+        # Kept raw, because acting on a caption is lossy: the conversion folded it into the note's
+        # wording, and this is the only place the owner's own words survive to explain why the note
+        # came out the way it did.
+        if message.caption:
+            extra["caption"] = message.caption
         path = write_note(
             inbox_dir=settings.inbox_dir,
             body=body,
@@ -327,7 +350,7 @@ async def _handle_pdf(
             source="telegram",
             note_type="document",
             tags=[],
-            extra={"telegram_message_id": message.message_id, "original_file": src.name},
+            extra=extra,
             slug_source=title,
         )
         # Last, per the deferral rule: everything above is replayable, this is not.

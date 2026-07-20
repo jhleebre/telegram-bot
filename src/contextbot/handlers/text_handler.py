@@ -101,9 +101,13 @@ def _clean_summary(value: object) -> str | None:
     return summary
 
 
-async def enrich(text: str, engine: ClaudeCLI) -> Enrichment | None:
-    """Ask Claude for title/tags/summary. Returns None when the pass is unusable."""
-    prompt = prompts.render("text_enrich", text=text)
+async def enrich(text: str, engine: ClaudeCLI, *, caption: str = "") -> Enrichment | None:
+    """Ask Claude for title/tags/summary. Returns None when the pass is unusable.
+
+    ``caption`` is what the owner typed alongside a sent file, and it is empty for a typed memo —
+    the memo *is* the text, so there is nothing standing outside it to take direction from.
+    """
+    prompt = prompts.render("text_enrich", text=text, caption=prompts.caption_section(caption))
     result = await engine.run(
         prompt, system_prompt=_SYSTEM_PROMPT, timeout_sec=_ENRICH_TIMEOUT_SEC
     )
@@ -128,6 +132,7 @@ async def enrich_or_fallback(
     *,
     engine: ClaudeCLI | None = None,
     message_id: int | None = None,
+    caption: str = "",
 ) -> tuple[Enrichment | None, str | None]:
     """Enrich ``text``, returning ``(enrichment, degraded_reason)``.
 
@@ -141,7 +146,7 @@ async def enrich_or_fallback(
 
     engine = engine or build_engine(settings)
     try:
-        return await enrich(text, engine), None
+        return await enrich(text, engine, caption=caption), None
     except ClaudeUsageLimit as exc:
         # Transient and time-bound: defer rather than save a weaker note the owner would have
         # to find and fix later. Nothing is written yet, so the replay starts clean.

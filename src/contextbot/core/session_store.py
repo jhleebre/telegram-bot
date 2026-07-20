@@ -96,6 +96,10 @@ class PendingReview:
     # has no way to know. Distinct from note_type on purpose — `meeting-note` is the frontmatter
     # `type:`, `회의` is the filename, and the vault uses both, differently.
     category: str = "노트"
+    # What the owner typed alongside the recording. The draft already reflects it — it was in the
+    # producer's prompt — so this copy exists for the finished note's frontmatter, which is written
+    # at the far end of a review that may outlive the process that started it.
+    caption: str = ""
 
     @property
     def review_dir(self) -> Path:
@@ -148,6 +152,7 @@ class PendingReview:
             "note_type": self.note_type,
             "tags": list(self.tags),
             "category": self.category,
+            "caption": self.caption,
         }
 
     @classmethod
@@ -168,6 +173,7 @@ class PendingReview:
             note_type=str(data.get("note_type") or "note"),
             tags=list(data.get("tags") or []),
             category=str(data.get("category") or "노트"),
+            caption=str(data.get("caption") or ""),
         )
 
 
@@ -267,6 +273,7 @@ class SessionStore:
         created_at: datetime | None = None,
         note_type: str = "note",
         category: str = "노트",
+        caption: str = "",
     ) -> PendingReview:
         """Reserve a review: make its stable directories and record the resume handle.
 
@@ -294,6 +301,7 @@ class SessionStore:
             state=ReviewState.QUEUED,
             note_type=note_type,
             category=category,
+            caption=caption,
         )
         self._put(review)
         logger.info("review %s created (session=%s)", message_id, session_id)

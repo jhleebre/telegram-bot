@@ -29,3 +29,19 @@ def load(name: str) -> str:
 def render(name: str, **values: object) -> str:
     """Load ``<name>.md`` and substitute ``{placeholder}`` values into it."""
     return load(name).format(**values)
+
+
+# Caption text is *substituted into* this template, never formatted as one, so braces the owner
+# happened to type are inert. Same reason every other value is safe: `render` formats the template,
+# not the values.
+def caption_section(caption: str | None) -> str:
+    """Render the shared caption block, or ``""`` when the owner typed nothing.
+
+    Every media route asks for this and drops the result into its own ``{caption}`` slot, so the
+    policy for what a caption may and may not do is written once (``caption.md``) rather than
+    drifting between four prompts. An empty string is the whole no-caption path: the templates read
+    identically to how they did before captions existed, so a bare file behaves exactly as it did.
+    """
+    if not caption or not caption.strip():
+        return ""
+    return render("caption", caption=caption.strip())

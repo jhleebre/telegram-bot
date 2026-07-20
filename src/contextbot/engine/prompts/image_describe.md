@@ -8,6 +8,8 @@ The image is the file at this exact path, and it is the only file in its directo
 you write on what you actually see in that rendering — never on the file's name, its bytes, or its
 metadata.
 
+{caption}
+
 Then output Markdown and nothing else — no preamble, no closing remarks, and no code fence around
 the whole reply. Use exactly this structure, starting with the title line:
 

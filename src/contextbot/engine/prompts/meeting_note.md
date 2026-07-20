@@ -18,6 +18,8 @@ against the recording, so keep track of where things were said; step 3 needs the
 
 {glossary}
 
+{caption}
+
 # Step 1 — write the note
 
 Output Markdown and nothing else: no preamble, no closing remarks, and no code fence around the
@@ -131,7 +133,11 @@ Ask about the **content and the words**, never about formatting or your own word
 transcript is clean, the glossary covered everything, and you had to guess at nothing, write
 `- (없음)` under the heading and nothing else — **do not manufacture questions to fill the list.**
 A term the glossary already settles is **not** a question: it is settled, and asking again wastes
-the author's attention on something they have already told you.
+the author's attention on something they have already told you. **The owner's note above settles
+things the same way** — it is the author speaking, so if it names the attendees, dates the meeting,
+or spells out a term the recogniser mangled, use what it says and ask nothing about it. Asking a
+person to confirm what they just finished telling you is the fastest way to make this step feel
+like noise.
 
 Write in Korean, unless the meeting was held in another language, in which case use that one.
 
