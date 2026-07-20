@@ -26,6 +26,7 @@ from ..handlers.conversation import (
     handle_reply,
     promote_next,
 )
+from ..engine.usage import usage_summary
 from .health import HealthChecker, HealthReport
 from .hwm import HighWaterMark
 from .notifier import Notifier
@@ -229,7 +230,13 @@ class ClientService:
             reply = await handle_reply(text, self._settings, store=self._store) if answerable else None
             # None means no review acted on it — not that there is nothing to say.
             if reply is None:
-                reply = bot_dm_status(self._store, stale=not answerable)
+                # `/usage` is local and takes ~2s, which is cheap for the idle reply (it is the
+                # whole message) and pure delay for any other — so it is read only when it will
+                # actually be shown. `usage_summary` never raises; a failure becomes one line.
+                usage = (
+                    await usage_summary(self._settings) if self._store.pending() is None else None
+                )
+                reply = bot_dm_status(self._store, stale=not answerable, usage=usage)
         except Exception as exc:  # noqa: BLE001 - a bad turn must not kill the poll loop
             logger.exception("Bot-DM turn failed")
             reply = f"⚠️ 검토 처리 중 오류가 발생했습니다: {exc}"
