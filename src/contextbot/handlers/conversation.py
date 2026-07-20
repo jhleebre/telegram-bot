@@ -377,13 +377,10 @@ def promote_next(store: SessionStore) -> str | None:
 # error makes Telegram reject the message — which `Notifier` *swallows*, so a confirmation would
 # vanish rather than fail. Backticks are the project's existing convention for "type this", and
 # they read fine as quotes even unrendered.
-_USAGE = (
-    "메모·파일·녹음은 Saved Messages로 보내주세요 — 그게 노트가 되는 입구입니다.\n"
-    "이 대화는 회의록 초안을 함께 다듬는 곳이고요."
-)
+_USAGE = "메모·파일·녹음은 Saved Messages로 보내주세요."
 
 
-def bot_dm_status(store: SessionStore, *, stale: bool = False) -> str:
+def bot_dm_status(store: SessionStore, *, stale: bool = False, usage: str | None = None) -> str:
     """What to say to an owner's message that no review is going to act on.
 
     **Every message gets an answer, and the rule has no exceptions** — that is the point of it.
@@ -397,10 +394,17 @@ def bot_dm_status(store: SessionStore, *, stale: bool = False) -> str:
     cannot be that review's answer (the poller's backlog rule). Saying so matters — the owner very
     likely typed `확인` at a question they had not yet been shown, and a bare status reply would
     look like their answer had been ignored.
+
+    ``usage`` is the plan's remaining allowance (see `engine/usage.py`), and it rides on the *idle*
+    reply only. That is the message this proves-it-is-alive rule generates most of, and the one with
+    nothing else in it — while a review is open the reply's job is to name the draft that is waiting,
+    and a limits table under it would bury the question the owner still has to answer. Passed in
+    rather than read here so this stays pure: the reading is a subprocess call.
     """
     review = store.pending()
     if review is None:
-        return f"🤖 실행 중입니다 — 지금은 검토 중인 초안이 없습니다.\n\n{_USAGE}"
+        parts = ["🤖 실행 중입니다 — 지금은 검토 중인 초안이 없습니다.", _USAGE, usage or ""]
+        return "\n\n".join(part for part in parts if part)
 
     asking = (
         f"📝 검토 중인 초안이 있습니다 — 「{review.title}」\n"

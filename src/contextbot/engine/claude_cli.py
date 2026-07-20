@@ -364,6 +364,52 @@ class ClaudeCLI:
         logged_in = data.get("loggedIn") if isinstance(data, dict) else None
         return logged_in if isinstance(logged_in, bool) else None
 
+    async def usage_text(self, *, timeout_sec: float = 30.0) -> str:
+        """Return the raw output of ``claude -p /usage``. Raises :class:`ClaudeError` on failure.
+
+        Like ``check_auth`` this is a **local call that consumes no usage** — the CLI reads this
+        machine's own session records and prints them; measured at ~2s against v2.1.187. That is
+        what makes it affordable on a status reply.
+
+        It cannot go through :meth:`run`, and not by accident: ``_build_argv`` passes
+        ``--disable-slash-commands``, which is right for every prompt this app sends a model and
+        exactly wrong here — ``/usage`` *is* the slash command. Nor is ``--output-format json``
+        used: the local commands answer in prose, and asking for JSON yields a model-shaped
+        envelope rather than the report. Parsing lives in :mod:`engine.usage`.
+        """
+        executable = self.resolve()
+        if executable is None:
+            raise ClaudeUnavailable(f"{self.executable!r} not found")
+
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                executable,
+                "-p",
+                "/usage",
+                # Hermetic for the same reason every other run is: no MCP servers to start, no
+                # project settings to honour. A status reply must not depend on the cwd it lands in.
+                "--strict-mcp-config",
+                "--setting-sources",
+                "",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            if proc is not None:
+                await self._terminate(proc)
+            raise ClaudeTimeout(f"/usage exceeded {timeout_sec:.0f}s") from None
+        except OSError as exc:
+            raise ClaudeUnavailable(f"{self.executable!r} could not be executed: {exc}") from exc
+
+        text = stdout.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0 or not text:
+            detail = stderr.decode("utf-8", errors="replace").strip()[:200]
+            raise ClaudeError(f"/usage exited {proc.returncode}: {detail or '<no output>'}")
+        return text
+
     @staticmethod
     async def _terminate(proc: asyncio.subprocess.Process) -> None:
         """Kill a still-running child and reap it, ignoring races where it already exited."""

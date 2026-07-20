@@ -73,6 +73,23 @@ client can read Saved Messages history, which removes the 24h limit entirely.
   best thing: **silence means it is not running.** (Nothing is lost meanwhile — Telegram queues
   your message for 24h and the bot answers it on the next Start.)
 
+  When nothing is under review, that status also tells you **how much of your Claude plan is
+  left** — both the 5-hour and the 7-day window, with the time each one resets:
+
+  ```
+  🤖 실행 중입니다 — 지금은 검토 중인 초안이 없습니다.
+
+  메모·파일·녹음은 Saved Messages로 보내주세요.
+
+  📊 사용량 (이 기기 기준)
+  • 5시간 한도: 31% 사용 — 7월 20일 오후 2:49 리셋
+  • 7일 한도: 5% 사용 — 7월 24일 오후 7:59 리셋
+  ```
+
+  It comes from `claude -p /usage`, which reads this machine's own records — so it costs no usage
+  to ask, and, as the CLI itself says, it does **not** include other devices or claude.ai. Type
+  anything at the bot to see it.
+
   Notes are filed the way the rest of your vault is: **`YYMMDD-<분류>-<제목>.md`**. A recording is
   `회의`, a message or screenshot is `노트`, and a document is classified from its own content into
   one of `전략` / `기획` / `조사` / `안건` / `보고` / `초안`.
@@ -92,7 +109,8 @@ The bot **stops itself and leaves the message unprocessed** rather than saving a
 ```
 
 Nothing is lost — the message stays in your Saved Messages. Once the limit resets, press **Start**
-and the bot resumes from exactly that message, in order. Claude Code usage on a Pro/Max plan draws
+and the bot resumes from exactly that message, in order. To see this coming, type anything at the
+bot DM: the status reply reports both usage windows and when they reset. Claude Code usage on a Pro/Max plan draws
 from your subscription's usage limits, not from API billing, so this costs nothing beyond the
 subscription (usage credits are opt-in and off by default).
 
@@ -243,6 +261,7 @@ src/contextbot/
 ├── engine/
 │   ├── claude_cli.py     # async wrapper over headless `claude -p` (JSON result, sessions)
 │   ├── parsing.py        # recover a JSON object from a model's free-text reply
+│   ├── usage.py          # what `claude -p /usage` says is left of the plan's two windows
 │   └── prompts/          # prompt templates (*.md)
 ├── handlers/             # text / document / image / audio handlers + the review conversation
 ├── stt/                  # local speech-to-text (mlx-whisper), ported in — no external project
