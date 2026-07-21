@@ -125,6 +125,14 @@ the timestamp where it was said, so the author can scrub to it and listen:
 - 「팀웹」이 「T-map」 맞나요? `[02:13]` "팀웹 관련 안건을 맡고"
 - 「김지군 담당님」은 누구인가요? 「김지훈」인가요? `[14:02]` "김지군 담당님 말씀대로"
 
+**Copy the timestamp from the transcript — do not estimate it.** Find the line that actually
+contains the word, take its start time straight off that line's `[MM:SS -> MM:SS]` stamp, and quote
+the line's text verbatim beside it. The timestamp is there so the author can scrub straight to the
+word and hear what was said; a remembered or guessed one sends them to the wrong place and wastes
+exactly the minute it was meant to save. Never write a time you did not read off the line you are
+quoting — if you cannot find the word on a timestamped line, quote the line you did find rather than
+inventing a time.
+
 **Attendees you had to guess at**, when the transcript never says plainly who was in the room:
 
 - 참석자가 김철수, 이영희 두 명 맞나요? 전사에는 이름이 한 번씩만 나옵니다.
