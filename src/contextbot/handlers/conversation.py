@@ -134,8 +134,11 @@ def _elide(text: str, limit: int) -> str:
     return text[:limit].rstrip() + _ELIDED
 
 
+# One rule, used twice: below the draft and below the questions. The two together frame the
+# questions as the single block the owner acts on, so it never reads as a continuation of the draft.
+_RULE = "──────────"
 _FOOTER = (
-    "──────────\n"
+    f"{_RULE}\n"
     "이대로 저장하려면 `확인`, 버리려면 `취소`.\n"
     "고칠 부분이 있으면 그냥 알려주세요 — 반영해서 다시 보여드립니다."
 )
@@ -148,7 +151,9 @@ def review_block(review: PendingReview) -> str:
     gives up whatever room they need — the draft is the part they can read in the note.
     """
     header = f"📝 초안이 준비됐습니다 — 「{review.title}」"
-    questions = review.questions if _has_questions(review.questions) else ""
+    # A rule above the questions mirrors the one above the footer: the draft ends (often on the
+    # elision notice), the rule breaks the flow, and the questions read as their own block.
+    questions = f"{_RULE}\n\n{review.questions}" if _has_questions(review.questions) else ""
 
     # Everything except the draft is fixed cost; the draft takes what is left of the budget.
     fixed = len("\n\n".join(part for part in [header, "", questions, _FOOTER] if part))

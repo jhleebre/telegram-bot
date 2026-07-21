@@ -169,6 +169,29 @@ def test_review_block_hides_an_empty_question_list(store):
     assert "(없음)" not in review_block(review)
 
 
+def test_a_rule_separates_the_draft_from_the_questions(store):
+    """The draft ends (often on the elision notice) and the questions read as their own block: a
+    rule between them, mirroring the one above the footer."""
+    review = store.create(message_id=7, session_id="s", title="t", source_date=DATE)
+    review.write_draft("본문")
+    review.questions = "- 담당자는 누구인가요?"
+
+    block = review_block(review)
+    # The draft, then a rule, then the questions — the rule sits between the two.
+    assert block.index("본문") < block.index("──────────") < block.index("담당자는 누구인가요?")
+    # Two rules in all: one framing the top of the questions, one framing the footer below them.
+    assert block.count("──────────") == 2
+
+
+def test_no_rule_hangs_over_the_footer_when_there_are_no_questions(store):
+    """With nothing to ask, the questions block is empty — so only the footer's own rule remains,
+    and the owner is not shown a separator floating above nothing."""
+    review = store.create(message_id=7, session_id="s", title="t", source_date=DATE)
+    review.write_draft("본문")
+    review.questions = "- (없음)"
+    assert review_block(review).count("──────────") == 1
+
+
 # ----------------------------------------------------- crash during the first turn
 def test_discard_incomplete_drops_a_review_whose_first_turn_never_finished(store):
     """The store entry is written before the first call, so a crash mid-call leaves a review with
