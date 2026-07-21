@@ -512,6 +512,20 @@ async def _accept(
     return f"✅ 저장됨: {path.name}{glossary_note}"
 
 
+def _turn_timeout(review: PendingReview, settings: Settings) -> float:
+    """How long a resumed turn on this review may run.
+
+    A **meeting** revision is as expensive as the meeting draft was — it resumes the same session,
+    re-reads the same transcript, and re-emits the whole note — so it gets the meeting budget, not
+    the generic review floor. Drafting a meeting with an hour and then giving its revision two minutes
+    is the asymmetry that made a long meeting's correction time out with the draft still un-applied.
+    Every other review is a short text memo, where the 120s floor is plenty.
+    """
+    if review.note_type == _MEETING_TYPE:
+        return settings.claude_meeting_timeout_sec
+    return max(settings.claude_timeout_sec, _REVIEW_TIMEOUT_SEC)
+
+
 async def _confirmed_terms(
     review: PendingReview, settings: Settings, *, engine: ClaudeCLI | None
 ) -> list[GlossaryEntry]:
@@ -530,7 +544,7 @@ async def _confirmed_terms(
         resume=review.session_id,
         add_dirs=[review.work_dir],
         cwd=review.work_dir,
-        timeout_sec=max(settings.claude_timeout_sec, _REVIEW_TIMEOUT_SEC),
+        timeout_sec=_turn_timeout(review, settings),
     )
     return parse_entries(result.text)
 
@@ -560,7 +574,7 @@ async def _revise(
             resume=review.session_id,
             add_dirs=[review.work_dir],
             cwd=review.work_dir,
-            timeout_sec=max(settings.claude_timeout_sec, _REVIEW_TIMEOUT_SEC),
+            timeout_sec=_turn_timeout(review, settings),
         )
         if _draft_failed(result.text):
             raise ClaudeError("수정본을 만들지 못했습니다")

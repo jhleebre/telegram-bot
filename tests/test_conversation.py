@@ -359,6 +359,27 @@ async def test_the_correction_text_reaches_the_prompt(live, store):
     assert "담당자는 김철수" in engine.calls[0]["prompt"]
 
 
+async def test_a_meeting_revision_gets_the_meeting_timeout(live, store):
+    """Revising a meeting resumes the same session, re-reads the transcript, and re-emits the whole
+    note — as expensive as the draft, which got the meeting budget. Giving the revision the generic
+    120s floor is what timed a long meeting's correction out with the draft still un-applied."""
+    engine = FakeEngine(ClaudeResult(text=REVISED))
+    await _open_review(live, store, note_type="meeting-note")
+
+    await handle_reply("담당자는 김철수", live, store=store, engine=engine)
+    assert engine.calls[0]["timeout_sec"] == live.claude_meeting_timeout_sec
+
+
+async def test_a_text_memo_revision_keeps_the_generic_floor(live, store):
+    """Only meetings carry the transcript weight; a text memo revision is short, so it stays on the
+    review floor rather than borrowing the meeting's hour."""
+    engine = FakeEngine(ClaudeResult(text=REVISED))
+    await _open_review(live, store, note_type="note")
+
+    await handle_reply("한 줄 고쳐주세요", live, store=store, engine=engine)
+    assert engine.calls[0]["timeout_sec"] == max(live.claude_timeout_sec, 120.0)
+
+
 async def test_a_revision_loops_back_to_awaiting_not_to_a_note(live, store):
     """The owner reviews a revision before it becomes a note — a correction is not an acceptance."""
     engine = FakeEngine(ClaudeResult(text=REVISED))
